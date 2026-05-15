@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔐 安全漏洞
+    url: https://github.com/dongfengchat/dfchat/security/policy
+    about: 安全相关问题请走 SECURITY.md 私下渠道，不要开公开 issue
+  - name: 💬 提问 / 讨论
+    url: https://github.com/dongfengchat/dfchat/discussions
+    about: 使用问题、最佳实践、想法交流（不是 bug）

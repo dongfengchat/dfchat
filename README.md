@@ -4,6 +4,10 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://dfchat.chat/#download)
+[![Release](https://img.shields.io/github/v/release/dongfengchat/dfchat?include_prereleases&label=release)](https://github.com/dongfengchat/dfchat/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/dongfengchat/dfchat/release.yml?label=build)](https://github.com/dongfengchat/dfchat/actions)
+[![Last commit](https://img.shields.io/github/last-commit/dongfengchat/dfchat)](https://github.com/dongfengchat/dfchat/commits/main)
+[![Issues](https://img.shields.io/github/issues/dongfengchat/dfchat)](https://github.com/dongfengchat/dfchat/issues)
 [![Backend: Go](https://img.shields.io/badge/backend-Go%201.26-00ADD8.svg)](server/)
 [![Frontend: Electron](https://img.shields.io/badge/frontend-Electron%2032-47848F.svg)](client/)
 

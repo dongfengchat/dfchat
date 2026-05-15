@@ -1,0 +1,81 @@
+name: 🐛 Bug 报告
+description: 报告 DFCHAT 客户端 / 服务端的可复现问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告 bug！请尽量提供下面要求的信息——细节越多，越快被修复。
+        **如果是安全漏洞，请走 [SECURITY.md](../SECURITY.md) 私下报告，不要在这里公开。**
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象描述
+      description: 出了什么问题？看到的实际行为是什么？
+      placeholder: |
+        例：群聊里发消息后，自己屏幕上没有出现，但其他成员能看到。
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 一步步告诉我们怎么复现
+      placeholder: |
+        1. 打开 DFCHAT 登录
+        2. 进入群组 "测试群"
+        3. 输入 "hello" 回车
+        4. 看到 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      placeholder: |
+        例：自己发的消息应该立即出现在聊天窗口。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - 其他 / 不适用
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: DFCHAT 版本
+      description: 设置 → 关于 → 版本号
+      placeholder: v0.1.16
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图
+      description: |
+        - 客户端 crash log：设置 → 关于 → 「打开日志文件夹」里最新的 `crash-YYYY-MM-DD.log`
+        - 服务端日志（自部署）：`docker logs deploy-api-1 --tail 100`
+        - 必要时附截图
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 自检
+      options:
+        - label: 我已搜索现有 issues，确认这不是重复问题
+          required: true
+        - label: 我使用的是最新版本（或确认旧版本里也存在）
+          required: true
