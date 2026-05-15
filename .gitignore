@@ -1,0 +1,55 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Env
+.env
+.env.local
+*.env
+
+# Server (Go)
+server/bin/
+server/dist/
+server/tmp/
+server/coverage.out
+
+# Client (Node / Electron)
+client/node_modules/
+client/dist/
+client/dist-electron/
+client/out/
+client/release/
+client/.vite/
+
+# Logs
+*.log
+logs/
+
+# Data volumes
+data/
+deploy/data/
+deploy/.env.prod
+
+# Operator-only — contains production server credentials. Never commit.
+server.rtf
+server.txt
+server.md
+*.credentials
+
+# Local build caches
+.cache/
+
+# Built binaries (release artifacts belong in GitHub Releases, not the repo)
+*.dmg
+*.exe
+*.AppImage
+*.zip
+
+# Internal brand-asset working folder (regenerated via OpenAI images-2)
+DFimages/
+.claude/
