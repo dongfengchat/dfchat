@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" role="img" aria-label="直播间">
+  <!-- Window frame -->
+  <rect width="800" height="500" rx="20" fill="#0b0d11"/>
+  <rect x="0" y="0" width="800" height="56" rx="20" fill="#15171d"/>
+  <rect x="0" y="36" width="800" height="20" fill="#15171d"/>
+  <circle cx="28" cy="28" r="6" fill="#ef4444"/>
+  <circle cx="50" cy="28" r="6" fill="#f5b042"/>
+  <circle cx="72" cy="28" r="6" fill="#3ba55c"/>
+  <text x="400" y="34" font-family="system-ui,-apple-system,sans-serif" font-size="13" fill="#94a0b0" text-anchor="middle">东风快信 · 直播</text>
+
+  <!-- Video area (16:9 within left col) -->
+  <rect x="32" y="80" width="500" height="282" rx="14" fill="#1c1f27"/>
+
+  <!-- Streamer silhouette -->
+  <circle cx="282" cy="190" r="42" fill="#6f4dd1"/>
+  <ellipse cx="282" cy="290" rx="100" ry="72" fill="#6f4dd1"/>
+  <rect x="32" y="290" width="500" height="72" fill="#1c1f27"/>
+
+  <!-- LIVE red badge -->
+  <rect x="48" y="96" width="64" height="26" rx="6" fill="#ef4444"/>
+  <circle cx="60" cy="109" r="4" fill="#fff"/>
+  <text x="100" y="114" font-family="system-ui,-apple-system,sans-serif" font-size="12" font-weight="700" fill="#fff" text-anchor="end">LIVE</text>
+
+  <!-- Viewer count pill -->
+  <rect x="124" y="96" width="86" height="26" rx="13" fill="rgba(0,0,0,0.55)"/>
+  <circle cx="138" cy="109" r="4" fill="none" stroke="#fff" stroke-width="1.5"/>
+  <path d="M134 113 q4 -3 8 0" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  <text x="150" y="113" font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="#fff">1.2k 在线</text>
+
+  <!-- Floating danmaku across the video -->
+  <g font-family="system-ui,-apple-system,sans-serif" font-size="13" font-weight="500">
+    <text x="500" y="130" fill="#8eaaff" text-anchor="end">主播好厉害！</text>
+    <text x="460" y="160" fill="#fff" text-anchor="end">666666</text>
+    <text x="500" y="200" fill="#3ba55c" text-anchor="end">关注了 ⭐</text>
+    <text x="430" y="240" fill="#fff" text-anchor="end">这画质清晰！</text>
+    <text x="500" y="280" fill="#ed7d2b" text-anchor="end">🔥 火了</text>
+  </g>
+
+  <!-- Title & meta below player -->
+  <text x="32" y="392" font-family="system-ui,-apple-system,sans-serif" font-size="15" font-weight="700" fill="#f5f6f8">周末摸鱼直播 · 一起聊聊设计</text>
+  <text x="32" y="412" font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="#94a0b0">设计 · 累计观看 8.6k</text>
+
+  <!-- Right side: chat-style danmaku list -->
+  <rect x="556" y="80" width="212" height="378" rx="14" fill="#15171d" stroke="#3a4150"/>
+  <text x="572" y="104" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="600" fill="#94a0b0" letter-spacing="2">弹幕</text>
+  <line x1="568" y1="116" x2="756" y2="116" stroke="#3a4150"/>
+
+  <g font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="#cbd0d8">
+    <text x="572" y="142"><tspan fill="#5f6a78">21:14 · </tspan>主播好厉害</text>
+    <text x="572" y="166"><tspan fill="#5f6a78">21:14 · </tspan>666666</text>
+    <text x="572" y="190"><tspan fill="#5f6a78">21:15 · </tspan>关注了 ⭐</text>
+    <text x="572" y="214"><tspan fill="#5f6a78">21:15 · </tspan>这画质清晰</text>
+    <text x="572" y="238"><tspan fill="#5f6a78">21:15 · </tspan>🔥 火了</text>
+    <text x="572" y="262"><tspan fill="#5f6a78">21:16 · </tspan>今天直播多久？</text>
+    <text x="572" y="286"><tspan fill="#5f6a78">21:16 · </tspan>来晚了</text>
+    <text x="572" y="310"><tspan fill="#5f6a78">21:16 · </tspan>滴滴滴</text>
+  </g>
+
+  <!-- Danmaku input -->
+  <rect x="568" y="412" width="142" height="32" rx="16" fill="#252934"/>
+  <text x="580" y="432" font-family="system-ui,-apple-system,sans-serif" font-size="11" fill="#5f6a78">发条弹幕…</text>
+  <circle cx="730" cy="428" r="16" fill="#3a64ee"/>
+  <path d="M724 428 l8 -4 v8 z" fill="#fff"/>
+</svg>

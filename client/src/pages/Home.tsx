@@ -1,0 +1,343 @@
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  channelConvId,
+  fetchMe,
+  getGroupNotifyMode,
+  listFriends,
+  listGroups,
+  listPins,
+  privateConvId,
+} from '@/api/client';
+import { useUserStore } from '@/store/userStore';
+import { useChatStore, type ChatTarget } from '@/store/chatStore';
+import { wsClient } from '@/ws/client';
+import { syncAllConversations } from '@/sync/engine';
+import { useSeqStore } from '@/sync/seqStore';
+import { maybeNotify, setBadge } from '@/notify/notify';
+import { toast } from '@/components/ui/Toast';
+import { useCallStore, handleIncomingCallEvent } from '@/call/store';
+import type { ChatMessage, Pin as PinType, ReactionCount as ReactionCountType } from '@/types';
+import FriendSidebar from '@/components/FriendSidebar';
+import ChatView from '@/components/ChatView';
+import CallOverlay from '@/components/CallOverlay';
+import TitleBar from '@/components/TitleBar';
+import SearchModal from '@/components/SearchModal';
+
+export default function Home() {
+  const navigate = useNavigate();
+  const { user, accessToken, setSession, clear } = useUserStore();
+  const setFriends = useChatStore((s) => s.setFriends);
+  const setGroups = useChatStore((s) => s.setGroups);
+  const appendMessage = useChatStore((s) => s.appendMessage);
+  const replaceMessage = useChatStore((s) => s.replaceMessage);
+  const applyReactionUpdate = useChatStore((s) => s.applyReactionUpdate);
+  const addPin = useChatStore((s) => s.addPin);
+  const removePin = useChatStore((s) => s.removePin);
+  const setPeerRead = useChatStore((s) => s.setPeerRead);
+  const hydrateFromCache = useChatStore((s) => s.hydrateFromCache);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => {
+    if (!accessToken) {
+      navigate('/login', { replace: true });
+      return;
+    }
+
+    hydrateFromCache();
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const [me, friends, groups] = await Promise.all([fetchMe(), listFriends(), listGroups()]);
+        if (cancelled) return;
+        setSession(me, accessToken);
+        setFriends(friends);
+        setGroups(groups);
+        // Hydrate per-group notify mode (so muted groups stop popping
+        // toasts immediately, without waiting for the user to open
+        // MembersPanel). Best-effort: a failure just leaves mode at
+        // default 0 (all messages), matching server fallback.
+        const { setGroupNotifyMode } = useChatStore.getState();
+        await Promise.all(
+          groups.map(async (g) => {
+            try {
+              const m = await getGroupNotifyMode(g.id);
+              setGroupNotifyMode(g.id, (m as 0 | 1 | 2) ?? 0);
+            } catch { /* keep default */ }
+          }),
+        );
+      } catch (err: any) {
+        if (!cancelled) setError(err.message ?? '加载失败');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    wsClient.connect(accessToken);
+
+    const offMsg = wsClient.on((ev) => {
+      if (ev.type === 'chat.recv') {
+        const msg = ev.payload as ChatMessage;
+        appendMessage(msg);
+
+        const meId = useUserStore.getState().user?.id;
+        if (msg.senderId === meId) return;
+        // Honor "do not disturb" — muted conversation skips banner/sound.
+        if (useChatStore.getState().mutedConvs.has(msg.conversationId)) return;
+
+        const { friends, groups, channelsByGroup, activeTarget, groupNotifyModes } = useChatStore.getState();
+
+        // Group notify mode (0=all, 1=mention-only, 2=muted). Look up the
+        // owning group for channel messages too. mode 2 → skip outright;
+        // mode 1 → only notify if message mentions me.
+        let owningGroupId: string | null = null;
+        if (msg.conversationId.startsWith('g_')) {
+          owningGroupId = msg.conversationId.slice(2);
+        } else if (msg.conversationId.startsWith('c_')) {
+          const channelId = msg.conversationId.slice(2);
+          for (const [gid, chs] of Object.entries(channelsByGroup)) {
+            if (chs.some((c) => c.id === channelId)) { owningGroupId = gid; break; }
+          }
+        }
+        if (owningGroupId && meId) {
+          const mode = groupNotifyModes[owningGroupId] ?? 0;
+          if (mode === 2) return; // muted — no toast / desktop / sound
+          if (mode === 1) {
+            const mentioned = (msg.mentions ?? []).map(String).includes(String(meId));
+            if (!mentioned) return;
+          }
+        }
+        let senderName = `用户 ${msg.senderId}`;
+        let conversationTitle = senderName;
+
+        if (msg.conversationId.startsWith('c_')) {
+          const channelId = msg.conversationId.slice(2);
+          for (const [gid, chs] of Object.entries(channelsByGroup)) {
+            const ch = chs.find((c) => c.id === channelId);
+            if (ch) {
+              const g = groups.find((x) => x.id === gid);
+              conversationTitle = g ? `${g.name} · #${ch.name}` : `#${ch.name}`;
+              break;
+            }
+          }
+          const friend = friends.find((f) => f.id === msg.senderId);
+          if (friend) senderName = friend.nickname || friend.username;
+        } else if (msg.conversationId.startsWith('p_')) {
+          const f = friends.find((x) => x.id === msg.senderId);
+          if (f) {
+            senderName = f.nickname || f.username;
+            conversationTitle = senderName;
+          }
+        }
+
+        const activeConvId = !activeTarget
+          ? null
+          : activeTarget.kind === 'friend' && meId
+          ? privateConvId(meId, activeTarget.id)
+          : activeTarget.kind === 'channel'
+          ? channelConvId(activeTarget.channelId)
+          : null;
+        void maybeNotify(msg, { senderName, conversationTitle, activeConvId });
+        return;
+      }
+      if (ev.type === 'chat.recall') {
+        const msg = ev.payload as ChatMessage;
+        replaceMessage(msg);
+        return;
+      }
+      if (ev.type === 'chat.reaction') {
+        const p = ev.payload as { conversationId: string; messageId: string; reactions: ReactionCountType[] };
+        applyReactionUpdate(p.conversationId, p.messageId, p.reactions ?? []);
+        return;
+      }
+      if (ev.type === 'chat.pin') {
+        const p = ev.payload as { conversationId: string; messageId: string; pinnedBy: string };
+        // We don't have the full Pin from the event — fetch the list to get
+        // the snapshot. Cheap enough since pins are small.
+        listPinsAndStore(p.conversationId);
+        return;
+      }
+      if (ev.type === 'chat.unpin') {
+        const p = ev.payload as { conversationId: string; messageId: string };
+        removePin(p.conversationId, p.messageId);
+        return;
+      }
+      if (ev.type === 'chat.read') {
+        const p = ev.payload as { conversationId: string; userId: string; seq: number };
+        setPeerRead(p.conversationId, p.userId, p.seq);
+        return;
+      }
+      if (ev.type === 'friend.request') {
+        // Bump the sidebar badge + show a toast.
+        window.dispatchEvent(new Event('dfchat.friend-request'));
+        toast('收到新的好友请求', 'info');
+        return;
+      }
+      if (ev.type === 'friend.accepted') {
+        // Refresh friends list so the new entry appears immediately on both sides.
+        listFriends().then((fs) => setFriends(fs)).catch(() => {});
+        toast('对方接受了好友请求', 'success');
+        return;
+      }
+      if (ev.type.startsWith('call.')) {
+        handleIncomingCallEvent(ev.type, ev.payload);
+        return;
+      }
+      if (ev.type === 'live.host.golive') {
+        // A host the user follows just went live. Pop a desktop notification
+        // and offer to jump to /live.
+        const p = ev.payload as { roomId: string; title: string; coverUrl?: string };
+        window.electronAPI?.showNotification?.({
+          title: '关注的主播开播了',
+          body: p.title || '点开进入直播间',
+          conversationId: '',
+        });
+        toast(`${p.title || '关注的主播'} 开播了`, 'info');
+        return;
+      }
+      if (ev.type === 'live.host.offline') {
+        const p = ev.payload as { title: string };
+        toast(`${p.title || '关注的主播'} 已下播`, 'info');
+        return;
+      }
+      if (ev.type === 'live.host.scheduled') {
+        // A host we follow has scheduled a stream within the next ~10 min.
+        const p = ev.payload as { title: string; coverUrl?: string };
+        window.electronAPI?.showNotification?.({
+          title: '关注的主播即将开播',
+          body: p.title || '点开进入直播间',
+          conversationId: '',
+        });
+        toast(`即将开播：${p.title || '关注的主播'}`, 'info');
+        return;
+      }
+    });
+
+    async function listPinsAndStore(convId: string) {
+      try {
+        const pins = await listPins(convId);
+        useChatStore.getState().setPins(convId, pins as PinType[]);
+      } catch { /* ignore */ }
+    }
+
+    const offOpen = wsClient.onOpen(() => {
+      syncAllConversations();
+    });
+
+    const unsubSeq = useSeqStore.subscribe((state) => {
+      const muted = useChatStore.getState().mutedConvs;
+      let total = 0;
+      for (const id of new Set([...Object.keys(state.last), ...Object.keys(state.read)])) {
+        if (muted.has(id)) continue;
+        total += Math.max(0, (state.last[id] ?? 0) - (state.read[id] ?? 0));
+      }
+      void setBadge(total);
+    });
+
+    const offActivate = window.electronAPI?.onActivateConversation?.((convId) => {
+      const target = convIdToTarget(convId);
+      if (target) useChatStore.getState().setActiveTarget(target);
+    });
+
+    // Refresh friend presence every 30s.
+    const presenceTimer = window.setInterval(() => {
+      listFriends().then((fs) => setFriends(fs)).catch(() => {});
+    }, 30000);
+
+    return () => {
+      cancelled = true;
+      offMsg();
+      offOpen();
+      unsubSeq();
+      offActivate?.();
+      clearInterval(presenceTimer);
+      wsClient.close();
+      void setBadge(0);
+      useCallStore.getState().end();
+    };
+  }, [accessToken, navigate, setFriends, setGroups, setSession, appendMessage, replaceMessage, hydrateFromCache]);
+
+  function convIdToTarget(convId: string): ChatTarget | null {
+    if (convId.startsWith('c_')) {
+      const channelId = convId.slice(2);
+      const { channelsByGroup } = useChatStore.getState();
+      for (const [gid, chs] of Object.entries(channelsByGroup)) {
+        if (chs.some((c) => c.id === channelId)) {
+          return { kind: 'channel', groupId: gid, channelId };
+        }
+      }
+      return null;
+    }
+    if (convId.startsWith('p_')) {
+      const [, a, b] = convId.split('_');
+      const meId = useUserStore.getState().user?.id;
+      if (!meId) return null;
+      const other = a === meId ? b : a;
+      return { kind: 'friend', id: other };
+    }
+    return null;
+  }
+
+  async function handleLogout() {
+    // Best-effort server-side revoke first (refresh token in localStorage).
+    try {
+      const { logoutServer } = await import('@/api/client');
+      await logoutServer();
+    } catch { /* ignore */ }
+    wsClient.close();
+    useSeqStore.getState().clearAll();
+    clear();
+    navigate('/login', { replace: true });
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-bg-1">
+        <div className="text-ink-3 flex items-center gap-2 anim-fade">
+          <span className="w-5 h-5 rounded-full border-2 border-brand-500 border-r-transparent animate-spin" />
+          正在加载…
+        </div>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-bg-1">
+        <div className="text-accent-red">{error}</div>
+      </div>
+    );
+  }
+  if (!user) return null;
+
+  return (
+    <div className="h-screen flex flex-col bg-bg-1 text-ink-1">
+      <TitleBar title="东风快信" />
+      <div className="flex flex-1 min-h-0">
+        <FriendSidebar
+          onLogout={handleLogout}
+          onOpenAdmin={() => navigate('/admin')}
+          onOpenSearch={() => setSearchOpen(true)}
+          onOpenSettings={() => navigate('/settings')}
+          onOpenLive={() => navigate('/live')}
+        />
+        <ChatView />
+        <CallOverlay />
+      </div>
+      <SearchModal open={searchOpen} onClose={() => setSearchOpen(false)} />
+    </div>
+  );
+}

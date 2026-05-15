@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    // preload.ts runs in the renderer context and uses `window` to capture
+    // unhandled errors → forward them to main via IPC. So include DOM types.
+    "lib": ["ES2022", "DOM"],
+    // ESNext + Bundler resolution lets `import.meta.url` compile cleanly.
+    // Vite-plugin-electron emits ESM output (main.js stays import-friendly),
+    // and `main` in package.json already points at the .js so node loads it
+    // as ESM via the project's "type": "module".
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir": "dist-electron",
+    "rootDir": "electron"
+  },
+  "include": ["electron"]
+}

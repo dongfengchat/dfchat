@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" role="img" aria-label="注册界面">
+  <!-- Background -->
+  <rect width="800" height="500" rx="20" fill="#15171d"/>
+  <rect x="0" y="0" width="800" height="56" rx="20" fill="#1c1f27"/>
+  <rect x="0" y="36" width="800" height="20" fill="#1c1f27"/>
+  <!-- traffic lights -->
+  <circle cx="28" cy="28" r="6" fill="#ef4444"/>
+  <circle cx="50" cy="28" r="6" fill="#f5b042"/>
+  <circle cx="72" cy="28" r="6" fill="#3ba55c"/>
+  <text x="400" y="33" font-family="system-ui,-apple-system,sans-serif" font-size="13" fill="#94a0b0" text-anchor="middle">东风快信 · 注册</text>
+
+  <!-- Card -->
+  <rect x="220" y="100" width="360" height="360" rx="18" fill="#1c1f27" stroke="#3a4150" stroke-width="1"/>
+
+  <!-- Logo bubble -->
+  <rect x="364" y="124" width="72" height="72" rx="16" fill="#3a64ee"/>
+  <path d="M384 150 L416 150 a6 6 0 0 1 6 6 V174 a6 6 0 0 1 -6 6 H400 L390 192 V180 H384 a6 6 0 0 1 -6 -6 V156 a6 6 0 0 1 6 -6 Z" fill="#fff"/>
+  <circle cx="390" cy="165" r="2.5" fill="#3a64ee"/>
+  <circle cx="400" cy="165" r="2.5" fill="#3a64ee"/>
+  <circle cx="410" cy="165" r="2.5" fill="#3a64ee"/>
+
+  <!-- Title -->
+  <text x="400" y="225" font-family="system-ui,-apple-system,sans-serif" font-size="18" font-weight="700" fill="#f5f6f8" text-anchor="middle">创建你的账号</text>
+
+  <!-- Fields -->
+  <g font-family="system-ui,-apple-system,sans-serif" font-size="12">
+    <text x="244" y="262" fill="#94a0b0">用户名</text>
+    <rect x="244" y="270" width="312" height="34" rx="8" fill="#252934"/>
+    <text x="258" y="291" fill="#f5f6f8">alice</text>
+
+    <text x="244" y="322" fill="#94a0b0">邮箱</text>
+    <rect x="244" y="330" width="312" height="34" rx="8" fill="#252934"/>
+    <text x="258" y="351" fill="#f5f6f8">alice@example.com</text>
+
+    <text x="244" y="382" fill="#94a0b0">密码</text>
+    <rect x="244" y="390" width="312" height="34" rx="8" fill="#252934"/>
+    <text x="258" y="411" fill="#f5f6f8" letter-spacing="3">••••••••</text>
+  </g>
+
+  <!-- Submit button (floating below) -->
+  <rect x="244" y="438" width="312" height="38" rx="9" fill="#3a64ee"/>
+  <text x="400" y="461" font-family="system-ui,-apple-system,sans-serif" font-size="14" font-weight="600" fill="#fff" text-anchor="middle">立即注册</text>
+
+  <!-- Check decoration -->
+  <circle cx="630" cy="130" r="22" fill="#3ba55c"/>
+  <path d="M620 130 l8 8 l14 -14" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

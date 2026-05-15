@@ -1,0 +1,73 @@
+appId: cn.dongfang.dfchat
+productName: DFCHAT
+copyright: © 2026 东方信息
+
+directories:
+  output: release
+  buildResources: build
+
+# Ship the renderer + electron entry points only. node_modules tree-shakes
+# automatically based on what main/preload actually import.
+files:
+  - dist
+  - dist-electron
+  - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
+  - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
+  - "!**/node_modules/*.d.ts"
+  - "!**/node_modules/.bin"
+
+asar: true
+
+# Ad-hoc sign Mac .app so Apple Silicon will execute it (kernel rejects
+# unsigned arm64 binaries). Gatekeeper will still warn on first launch
+# until we have an Apple Developer ID.
+afterPack: ./build/afterPack.cjs
+
+mac:
+  category: public.app-category.social-networking
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  # icon: build/icon.icns   # drop a 1024×1024 .icns here once branding is ready
+  artifactName: DFCHAT-${version}-${arch}.${ext}
+  # hardenedRuntime / notarization left off — enable when Apple Developer ID is in place.
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # icon: build/icon.ico    # 256×256 ICO; falls back to electron stock if missing
+  artifactName: DFCHAT-Setup-${version}.${ext}
+
+# NSIS installer — proper wizard, per-user (no UAC prompt), creates
+# desktop + start-menu shortcuts, launches DFCHAT on finish.
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DFCHAT
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  installerLanguages:
+    - zh_CN
+    - en_US
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+  category: Network
+  artifactName: DFCHAT-${version}.${ext}
+
+# Auto-update channel (electron-updater). Default to a "generic" target so
+# you can point at any HTTPS folder — typically the MinIO bucket we already
+# run, or a CDN. Swap to `provider: github` when releases land on GitHub.
+#
+# To enable: replace url with your real download host and `npm run dist`.
+# In dev (`npm run dev`) the updater never checks, so this stays inert.
+publish:
+  provider: generic
+  url: https://updates.dfchat.example.com/${channel}
+  channel: latest

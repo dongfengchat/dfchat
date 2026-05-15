@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>东风快信</title>
+    <style>
+      /* Boot splash: shown while the JS bundle parses + React mounts.
+         The first real React render replaces #root's contents and this
+         disappears with the rest of the splash markup. */
+      html, body { background: #0b0d11; color: #f5f6f8; margin: 0; height: 100%; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
+          "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      }
+      #boot-splash {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 18px;
+        background: radial-gradient(circle at 50% 35%, #15171d 0%, #0b0d11 70%);
+        z-index: 9999;
+      }
+      #boot-splash .logo {
+        width: 72px; height: 72px; border-radius: 18px;
+        background: #3a64ee; display: flex; align-items: center; justify-content: center;
+        box-shadow: 0 10px 40px rgba(58,100,238,0.4);
+        animation: boot-pulse 1.8s ease-in-out infinite;
+      }
+      #boot-splash .logo svg { width: 44px; height: 44px; }
+      #boot-splash .title { font-size: 18px; font-weight: 600; color: #f5f6f8; letter-spacing: 1px; }
+      #boot-splash .hint { font-size: 12px; color: #5f6a78; letter-spacing: 2px; }
+      @keyframes boot-pulse {
+        0%, 100% { transform: scale(1); box-shadow: 0 10px 40px rgba(58,100,238,0.40); }
+        50%      { transform: scale(1.06); box-shadow: 0 10px 60px rgba(58,100,238,0.70); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="boot-splash" aria-hidden="true">
+        <div class="logo">
+          <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M5.5 7 H16.5 a2 2 0 0 1 2 2 V13.5 a2 2 0 0 1 -2 2 H11.5 L8.5 18 V15.5 H5.5 a2 2 0 0 1 -2 -2 V9 a2 2 0 0 1 2 -2 Z" fill="#ffffff"/>
+            <circle cx="8.7" cy="11.2" r="0.95" fill="#3a64ee"/>
+            <circle cx="11.6" cy="11.2" r="0.95" fill="#3a64ee"/>
+            <circle cx="14.5" cy="11.2" r="0.95" fill="#3a64ee"/>
+            <circle cx="19" cy="5" r="2" fill="#ef4444"/>
+          </svg>
+        </div>
+        <div class="title">东风快信</div>
+        <div class="hint">正在启动…</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

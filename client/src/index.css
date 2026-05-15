@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: #0b0d11;
+  color: #f5f6f8;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+
+@layer components {
+  /* Base styles for buttons + inputs to enforce a consistent baseline. */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg
+           text-sm font-medium px-3 py-2 transition-colors
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary { @apply btn bg-brand-500 hover:bg-brand-600 text-white; }
+  .btn-secondary { @apply btn bg-bg-4 hover:bg-bg-5 text-ink-1; }
+  .btn-ghost { @apply btn text-ink-2 hover:bg-bg-3; }
+  .btn-danger { @apply btn bg-accent-red/90 hover:bg-accent-red text-white; }
+  .btn-icon {
+    @apply inline-flex items-center justify-center rounded-lg w-9 h-9
+           text-ink-2 hover:text-ink-1 hover:bg-bg-3 transition-colors;
+  }
+
+  .input {
+    @apply w-full px-3 py-2 rounded-lg bg-bg-4 border border-bg-5/60
+           text-ink-1 placeholder-ink-4 outline-none transition-colors
+           focus:border-brand-500 focus:bg-bg-3;
+  }
+
+  .card {
+    @apply bg-bg-2 border border-bg-5/40 rounded-xl;
+  }
+
+  /* Animated background gradient for auth screens. */
+  .auth-bg {
+    background:
+      radial-gradient(1100px 600px at 0% 0%, rgba(58,100,238,0.18) 0%, transparent 60%),
+      radial-gradient(900px 500px at 100% 100%, rgba(58,100,238,0.10) 0%, transparent 55%),
+      #0b0d11;
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #1c1f27 0%, #252934 40%, #1c1f27 80%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: 0.5rem;
+}
+
+@keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes scale-in { from { opacity: 0; transform: scale(0.96) } to { opacity: 1; transform: scale(1) } }
+@keyframes slide-up { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
+.anim-fade { animation: fade-in 160ms ease-out both; }
+.anim-scale { animation: scale-in 180ms ease-out both; }
+.anim-slide { animation: slide-up 200ms ease-out both; }
+
+@keyframes jump-flash {
+  0% { box-shadow: 0 0 0 0 rgba(58,100,238,0.0); }
+  20% { box-shadow: 0 0 0 6px rgba(58,100,238,0.55); }
+  100% { box-shadow: 0 0 0 0 rgba(58,100,238,0.0); }
+}
+.jump-flash > div:first-child {
+  animation: jump-flash 1500ms ease-out;
+  border-radius: 1rem;
+}

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Rounded squircle base, brand blue -->
+  <rect width="1024" height="1024" rx="224" ry="224" fill="#3a64ee"/>
+  <!-- Chat bubble: rounded body + small tail in lower-left -->
+  <path d="
+    M232 260
+    H792
+    a104 104 0 0 1 104 104
+    V620
+    a104 104 0 0 1 -104 104
+    H552
+    L368 870
+    L368 724
+    H232
+    a104 104 0 0 1 -104 -104
+    V364
+    a104 104 0 0 1 104 -104
+    Z
+  " fill="#ffffff"/>
+  <!-- Three typing dots -->
+  <circle cx="380" cy="492" r="44" fill="#3a64ee"/>
+  <circle cx="512" cy="492" r="44" fill="#3a64ee"/>
+  <circle cx="644" cy="492" r="44" fill="#3a64ee"/>
+  <!-- Live indicator: red ring with white core (top-right corner) -->
+  <circle cx="824" cy="200" r="80" fill="#ef4444"/>
+  <circle cx="824" cy="200" r="28" fill="#ffffff"/>
+</svg>

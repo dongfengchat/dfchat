@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" role="img" aria-label="好友列表">
+  <!-- App window -->
+  <rect width="800" height="500" rx="20" fill="#15171d"/>
+  <rect x="0" y="0" width="800" height="56" rx="20" fill="#1c1f27"/>
+  <rect x="0" y="36" width="800" height="20" fill="#1c1f27"/>
+  <circle cx="28" cy="28" r="6" fill="#ef4444"/>
+  <circle cx="50" cy="28" r="6" fill="#f5b042"/>
+  <circle cx="72" cy="28" r="6" fill="#3ba55c"/>
+
+  <!-- Sidebar -->
+  <rect x="0" y="56" width="220" height="444" fill="#0b0d11"/>
+
+  <!-- Sidebar header + search -->
+  <rect x="20" y="80" width="180" height="30" rx="8" fill="#252934"/>
+  <circle cx="35" cy="95" r="5" fill="none" stroke="#94a0b0" stroke-width="1.5"/>
+  <line x1="39" y1="99" x2="44" y2="104" stroke="#94a0b0" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="52" y="99" font-family="system-ui,-apple-system,sans-serif" font-size="11" fill="#5f6a78">搜索联系人</text>
+
+  <text x="20" y="140" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#5f6a78" letter-spacing="1">好友 · 5</text>
+
+  <!-- Friend rows -->
+  <g font-family="system-ui,-apple-system,sans-serif" font-size="13" fill="#cbd0d8">
+    <!-- active row -->
+    <rect x="12" y="150" width="196" height="48" rx="10" fill="#1c1f27"/>
+    <circle cx="36" cy="174" r="16" fill="#6f4dd1"/>
+    <text x="36" y="178" font-size="13" font-weight="600" fill="#fff" text-anchor="middle">张</text>
+    <text x="62" y="170">张老师</text>
+    <text x="62" y="186" font-size="11" fill="#5f6a78">在线 · 刚刚活跃</text>
+    <circle cx="195" cy="174" r="4" fill="#3ba55c"/>
+
+    <circle cx="36" cy="222" r="16" fill="#3a64ee"/>
+    <text x="36" y="226" font-size="13" font-weight="600" fill="#fff" text-anchor="middle">L</text>
+    <text x="62" y="218">设计师 Lily</text>
+    <text x="62" y="234" font-size="11" fill="#5f6a78">@ 你</text>
+
+    <circle cx="36" cy="266" r="16" fill="#ed7d2b"/>
+    <text x="36" y="270" font-size="13" font-weight="600" fill="#fff" text-anchor="middle">W</text>
+    <text x="62" y="262">Wang</text>
+    <text x="62" y="278" font-size="11" fill="#5f6a78">2 条新消息</text>
+
+    <circle cx="36" cy="310" r="16" fill="#3ba55c"/>
+    <text x="36" y="314" font-size="13" font-weight="600" fill="#fff" text-anchor="middle">M</text>
+    <text x="62" y="306">Mike</text>
+    <text x="62" y="322" font-size="11" fill="#5f6a78">离线</text>
+
+    <circle cx="36" cy="354" r="16" fill="#a64dd1"/>
+    <text x="36" y="358" font-size="13" font-weight="600" fill="#fff" text-anchor="middle">J</text>
+    <text x="62" y="350">Joy</text>
+    <text x="62" y="366" font-size="11" fill="#5f6a78">在线</text>
+  </g>
+
+  <!-- + add friend FAB -->
+  <circle cx="190" cy="450" r="22" fill="#3a64ee"/>
+  <path d="M190 440 v20 M180 450 h20" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Right panel: add friend modal -->
+  <rect x="280" y="100" width="440" height="340" rx="16" fill="#1c1f27" stroke="#3a4150"/>
+  <text x="500" y="135" font-family="system-ui,-apple-system,sans-serif" font-size="16" font-weight="700" fill="#f5f6f8" text-anchor="middle">添加好友</text>
+  <line x1="320" y1="155" x2="680" y2="155" stroke="#3a4150"/>
+
+  <text x="320" y="190" font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="#94a0b0">对方用户名</text>
+  <rect x="320" y="200" width="360" height="38" rx="8" fill="#252934"/>
+  <text x="334" y="224" font-family="system-ui,-apple-system,sans-serif" font-size="13" fill="#f5f6f8">@alice</text>
+
+  <text x="320" y="270" font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="#94a0b0">附加留言（可选）</text>
+  <rect x="320" y="280" width="360" height="60" rx="8" fill="#252934"/>
+  <text x="334" y="304" font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="#cbd0d8">嗨，我是新同事 Bob，想加你</text>
+
+  <rect x="320" y="378" width="170" height="38" rx="9" fill="#252934"/>
+  <text x="405" y="402" font-family="system-ui,-apple-system,sans-serif" font-size="13" fill="#cbd0d8" text-anchor="middle">取消</text>
+  <rect x="510" y="378" width="170" height="38" rx="9" fill="#3a64ee"/>
+  <text x="595" y="402" font-family="system-ui,-apple-system,sans-serif" font-size="13" font-weight="600" fill="#fff" text-anchor="middle">发送请求</text>
+</svg>

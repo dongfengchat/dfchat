@@ -1,0 +1,2079 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b0d11" />
+<title>东风快信 · 现代 PC 端聊天 + 直播软件</title>
+<meta name="description" content="东风快信 — 一款面向 PC 用户的桌面端实时通讯软件。文字聊天、群组频道、语音视频通话、屏幕共享、文件传输，一站搞定。" />
+
+<!-- Favicons + PWA-style multi-size icons. realfavicongenerator output style. -->
+<link rel="icon" href="/favicon.ico" sizes="any" />
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
+
+<!-- Open Graph / Twitter Card -->
+<meta property="og:type" content="website" />
+<meta property="og:title" content="东风快信 · 团队沟通的桌面版微信" />
+<meta property="og:description" content="PC 端实时聊天 + 高清通话 + 屏幕共享。Windows / macOS / Linux 三端通用。" />
+<meta property="og:url" content="https://dfchat.chat/" />
+<meta property="og:image" content="https://dfchat.chat/img/og.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://dfchat.chat/img/og.png" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg-1: #0b0d11; --bg-2: #15171d; --bg-3: #1c1f27; --bg-4: #252934; --bg-5: #3a4150;
+    --ink-1: #f5f6f8; --ink-2: #cbd0d8; --ink-3: #94a0b0; --ink-4: #5f6a78;
+    --brand-300: #8eaaff; --brand-500: #3a64ee; --brand-600: #2c4ed1;
+    --accent-green: #3ba55c;
+  }
+  html, body { background: var(--bg-1); color: var(--ink-1); min-height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
+      "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--brand-300); text-decoration: none; }
+  a:hover { color: var(--brand-500); }
+  ::selection { background: var(--brand-500); color: #fff; }
+
+  /* ===== Layout ===== */
+  .nav {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(11,13,17,0.78); backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(58,65,80,0.4);
+  }
+  .nav-inner {
+    max-width: 1100px; margin: 0 auto; padding: 14px 24px;
+    display: flex; align-items: center; gap: 24px;
+  }
+  .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 600; font-size: 18px; color: var(--ink-1); }
+  .brand .logo {
+    width: 28px; height: 28px; display: inline-flex;
+    align-items: center; justify-content: center;
+  }
+  .brand .logo svg { width: 100%; height: 100%; display: block; }
+  .nav a.lk { color: var(--ink-3); font-size: 14px; }
+  .nav a.lk:hover { color: var(--ink-1); }
+  .nav-cta { margin-left: auto; display: flex; gap: 10px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 10px 16px; border-radius: 10px; font-size: 14px; font-weight: 500;
+    cursor: pointer; border: 0; transition: all .15s ease;
+    text-decoration: none; user-select: none;
+  }
+  .btn-primary { background: var(--brand-500); color: #fff; }
+  .btn-primary:hover { background: var(--brand-600); color: #fff; }
+  .btn-secondary { background: var(--bg-3); color: var(--ink-1); border: 1px solid rgba(58,65,80,0.6); }
+  .btn-secondary:hover { background: var(--bg-4); color: var(--ink-1); }
+  .btn-ghost { background: transparent; color: var(--ink-2); }
+  .btn-ghost:hover { color: var(--ink-1); background: var(--bg-3); }
+  .btn-lg { padding: 14px 22px; font-size: 15px; }
+
+  section { padding: 80px 24px; }
+  .container { max-width: 1100px; margin: 0 auto; }
+  .eyebrow {
+    display: inline-block; font-size: 12px; color: var(--brand-300);
+    letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 12px;
+  }
+  h1 { font-size: clamp(34px, 5vw, 56px); line-height: 1.1; letter-spacing: -0.02em; font-weight: 700; }
+  h2 { font-size: clamp(26px, 3vw, 36px); line-height: 1.2; letter-spacing: -0.01em; font-weight: 700; margin-bottom: 14px; }
+  .lead { font-size: 18px; color: var(--ink-2); max-width: 640px; margin: 16px 0 28px; }
+  .muted { color: var(--ink-3); }
+
+  /* ===== Three.js 3D background canvas =====
+     Fixed under the hero section. When WebGL is available, JS sets
+     <body class="has-3d"> and the hero shifts to a transparent bg so
+     the canvas shows through. Falls back gracefully if WebGL is
+     unavailable (old browsers, headless, broken drivers).
+  */
+  #three-bg {
+    position: fixed; inset: 0; width: 100vw; height: 100vh;
+    z-index: 0; pointer-events: none;
+    opacity: 0;                  /* faded in by JS when ready */
+    transition: opacity 0.8s ease-in;
+  }
+  body.has-3d #three-bg { opacity: 1; }
+  /* IMPORTANT: don't include `nav.nav` here — it would override the
+     `position: sticky` declared above (higher specificity). The nav stays
+     sticky; we just bump its z-index so it sits over the journey stage. */
+  .features, .download, .guide, #signup, footer {
+    position: relative; z-index: 1;
+  }
+  .nav { z-index: 50; }
+  .hero { position: relative; z-index: 1; }
+  /* === Cinematic mode (when 3D + scroll choreography active) === */
+  /* Every section becomes glass so the canvas shows through across the
+     full page, not just the hero. */
+  body.has-3d .hero,
+  body.has-3d .features,
+  body.has-3d .download,
+  body.has-3d .guide,
+  body.has-3d #signup,
+  body.has-3d footer {
+    background: transparent;
+  }
+  body.has-3d .features {
+    border-top: 1px solid rgba(255,255,255,0.06);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    backdrop-filter: blur(14px) saturate(120%);
+    -webkit-backdrop-filter: blur(14px) saturate(120%);
+    background: linear-gradient(180deg, rgba(11,13,17,0.55), rgba(11,13,17,0.75)) !important;
+  }
+  body.has-3d .download {
+    backdrop-filter: blur(14px) saturate(120%);
+    -webkit-backdrop-filter: blur(14px) saturate(120%);
+    background: linear-gradient(180deg, rgba(11,13,17,0.75), rgba(11,13,17,0.55)) !important;
+  }
+  body.has-3d .guide {
+    backdrop-filter: blur(14px) saturate(120%);
+    -webkit-backdrop-filter: blur(14px) saturate(120%);
+    background: linear-gradient(180deg, rgba(11,13,17,0.55), rgba(11,13,17,0.78)) !important;
+  }
+  body.has-3d #signup {
+    backdrop-filter: blur(14px) saturate(120%);
+    -webkit-backdrop-filter: blur(14px) saturate(120%);
+    background: rgba(15,17,23,0.65) !important;
+  }
+  body.has-3d footer { background: rgba(11,13,17,0.7) !important; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+  /* Card surfaces also become glass so the 3D peeks through them too. */
+  body.has-3d .card,
+  body.has-3d .dl-card,
+  body.has-3d .guide-card,
+  body.has-3d .install-help,
+  body.has-3d .signup-card {
+    background: rgba(21,23,29,0.55) !important;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-color: rgba(255,255,255,0.08);
+  }
+
+  /* === Hero cinematic loading sequence ===
+     Three lines fade in one-by-one, then the actual <h1> takes over.
+     Pure CSS — JS just toggles a class once they're done. */
+  .hero-loading {
+    display: flex; flex-direction: column; gap: 12px;
+    margin-bottom: 32px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px; color: var(--ink-4);
+    letter-spacing: 0.05em;
+  }
+  .hero-loading .hl-line { opacity: 0; transform: translateY(8px); transition: all .5s ease-out; }
+  .hero-loading.active .hl-line { opacity: 1; transform: translateY(0); }
+  .hero-loading.active .hl-line:nth-child(1) { transition-delay: 0.2s; }
+  .hero-loading.active .hl-line:nth-child(2) { transition-delay: 1.0s; }
+  .hero-loading.active .hl-line:nth-child(3) { transition-delay: 1.7s; }
+  .hl-line .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 10px; vertical-align: middle; background: var(--brand-300); animation: pulse-dot 1.4s infinite; }
+  .hl-line.done .dot { background: var(--accent-green); animation: none; }
+  .hl-line .v { color: var(--ink-2); }
+  @keyframes pulse-dot {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50%      { transform: scale(1.4); opacity: 0.5; }
+  }
+
+  /* === Scroll-triggered fade-in (.reveal) === */
+  .reveal {
+    opacity: 0; transform: translateY(40px);
+    transition: opacity .9s ease-out, transform .9s ease-out;
+  }
+  .reveal.in {
+    opacity: 1; transform: translateY(0);
+  }
+  .reveal-1 { transition-delay: 0.05s; }
+  .reveal-2 { transition-delay: 0.15s; }
+  .reveal-3 { transition-delay: 0.25s; }
+  .reveal-4 { transition-delay: 0.35s; }
+
+  /* === Right-edge scroll-progress dots === */
+  .scroll-progress {
+    position: fixed; right: 24px; top: 50%; transform: translateY(-50%);
+    z-index: 30; display: flex; flex-direction: column; gap: 16px;
+    pointer-events: auto;
+  }
+  .scroll-progress a {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.25);
+    transition: all .2s ease;
+    position: relative;
+  }
+  .scroll-progress a:hover { background: rgba(255,255,255,0.4); transform: scale(1.2); }
+  .scroll-progress a.current { background: var(--brand-300); border-color: var(--brand-300); transform: scale(1.4); box-shadow: 0 0 12px rgba(142,170,255,0.6); }
+  .scroll-progress a::after {
+    content: attr(data-label);
+    position: absolute; right: 22px; top: 50%; transform: translateY(-50%);
+    font-size: 11px; color: var(--ink-3);
+    white-space: nowrap; opacity: 0; transition: opacity .15s ease;
+    pointer-events: none;
+  }
+  .scroll-progress a:hover::after, .scroll-progress a.current::after { opacity: 1; }
+  @media (max-width: 768px) { .scroll-progress { display: none; } }
+
+  /* === Journey: scroll-pinned 4-stage story (sea-we-breathe style) ===
+     The container is 5× viewport tall. GSAP ScrollTrigger pins the
+     inner stage to the viewport while the user scrolls through that
+     range, scrubbing a progress value 0→1 we use to switch active
+     steps + animate the visual mock. */
+  .journey { padding: 0 !important; }
+  /* 5 stages × ~1 viewport scroll per stage + 1 overshoot = 600vh */
+  .journey-track { position: relative; height: 600vh; }
+  .journey-stage {
+    position: sticky; top: 0; height: 100vh;
+    /* Centred container on wide displays so the two columns don't stretch
+       across a 1920px viewport (looked like the text + the screenshot
+       were each pinned to the screen edges with the canvas glaring
+       through in the middle). */
+    max-width: 1180px; margin: 0 auto;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 64px;
+    align-items: center; padding: 0 48px;
+    overflow: hidden;
+  }
+  body.has-3d .journey-stage {
+    /* Heavy blur dissolves the galaxy into an ambient haze, but the
+       background stays semi-transparent so you still feel "in space"
+       rather than slammed against a wall. */
+    background: rgba(11,13,17,0.72);
+    backdrop-filter: blur(40px) saturate(115%);
+    -webkit-backdrop-filter: blur(40px) saturate(115%);
+  }
+  .journey-text {
+    max-width: 540px; position: relative;
+    /* Holds 4 absolutely-positioned steps stacked on top of each other.
+       Reserve enough height so the tallest step doesn't break layout. */
+    min-height: 340px;
+  }
+  .journey-progress {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px; color: var(--ink-4); letter-spacing: 0.15em;
+    margin-bottom: 20px; display: inline-flex; align-items: center; gap: 8px;
+    /* Keep the progress row above the absolutely-positioned steps. */
+    position: relative; z-index: 2;
+  }
+  /* Compact bar. Originally `flex: 1` so it stretched across the full
+     text column — way too prominent next to tiny "01 / 05 · 20%" labels. */
+  .journey-progress .bar {
+    width: 72px; height: 2px; border-radius: 1px;
+    background: rgba(255,255,255,0.18); position: relative;
+  }
+  .journey-progress .bar::after {
+    content: ""; position: absolute; left: 0; top: 0; height: 100%;
+    width: var(--p, 0%);
+    background: linear-gradient(90deg, var(--brand-500), var(--brand-300));
+    transition: width 0.3s ease-out;
+  }
+  .journey-step {
+    /* Sit BELOW the progress row, not on top of it. ~50px clears the
+       progress bar plus its margin-bottom. */
+    position: absolute; top: 48px; left: 0; right: 0;
+    opacity: 0; transform: translateY(20px);
+    transition: opacity 0.5s ease-out, transform 0.5s ease-out;
+    pointer-events: none;
+  }
+  .journey-step.active {
+    opacity: 1; transform: translateY(0);
+    pointer-events: auto;
+  }
+  .journey-step h2 {
+    /* Was 34-56 → caused overflow on narrow columns. Smaller upper bound
+       so 「一键发起，720p 直连」 fits on one line at 540px column width. */
+    font-size: clamp(26px, 3.2vw, 40px); line-height: 1.15;
+    margin: 10px 0 16px;
+    background: linear-gradient(135deg, #fff 0%, var(--brand-300) 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+  }
+  .journey-step .lead { font-size: 16px; max-width: none; margin: 0; }
+
+  .journey-visual {
+    position: relative; aspect-ratio: 4 / 3;
+    border-radius: 18px; overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.08);
+    box-shadow: 0 40px 80px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(255,255,255,0.03);
+    background: rgba(21,23,29,0.7);
+  }
+  .journey-mock {
+    position: absolute; inset: 0;
+    opacity: 0; transform: scale(0.96) translateY(20px);
+    transition: opacity 0.5s ease-out, transform 0.7s ease-out;
+    pointer-events: none;
+    padding: 24px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .journey-mock.active {
+    opacity: 1; transform: scale(1) translateY(0);
+    pointer-events: auto;
+  }
+  /* AI-generated image mocks: fill the .journey-visual frame, kill the
+     div-mock padding that used to live inside .journey-mock. */
+  .journey-img {
+    width: 100%; height: 100%; object-fit: cover;
+    padding: 0 !important; display: block;
+  }
+  .journey-mock .mk-title {
+    font-size: 12px; color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.18em;
+  }
+  .journey-mock .mk-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px; background: var(--bg-3);
+    border-radius: 12px; border: 1px solid rgba(255,255,255,0.05);
+  }
+  .journey-mock .mk-row .mk-avatar { width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0; }
+  .journey-mock .mk-row .mk-meta { flex: 1; min-width: 0; }
+  .journey-mock .mk-row .mk-name { font-size: 13px; color: var(--ink-1); }
+  .journey-mock .mk-row .mk-sub  { font-size: 11px; color: var(--ink-4); }
+  .journey-mock .mk-bubble {
+    max-width: 80%; padding: 10px 14px; border-radius: 14px;
+    font-size: 13px; line-height: 1.5;
+  }
+  .journey-mock .mk-bubble.them { background: var(--bg-3); color: var(--ink-1); align-self: flex-start; border-bottom-left-radius: 5px; }
+  .journey-mock .mk-bubble.me   { background: var(--brand-500); color: #fff; align-self: flex-end; border-bottom-right-radius: 5px; }
+  .journey-mock .mk-call {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; gap: 16px;
+  }
+  .journey-mock .mk-call .mk-avatar-big {
+    width: 96px; height: 96px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand-500), #a64dd1);
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 36px; font-weight: 600;
+    animation: pulse-ring 2s infinite;
+  }
+  /* Flat call-control buttons (mic / video / screen / hangup) */
+  .journey-mock .mk-ctrls { display: flex; gap: 12px; margin-top: 8px; }
+  .journey-mock .mk-ctrl {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--bg-3);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink-1);
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .journey-mock .mk-ctrl svg { width: 20px; height: 20px; }
+  .journey-mock .mk-ctrl.danger { background: #ed4245; color: #fff; border-color: transparent; }
+
+  /* Live broadcast mock: dark video with LIVE badge + danmaku */
+  .journey-mock .mk-live {
+    position: relative; flex: 1; min-height: 200px;
+    background: linear-gradient(135deg, #0a0c12 0%, #1c1f27 100%);
+    border-radius: 12px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink-3);
+  }
+  .journey-mock .mk-live .mk-live-icon {
+    width: 64px; height: 64px; color: var(--ink-4);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .journey-mock .mk-live .mk-live-icon svg { width: 100%; height: 100%; }
+  .journey-mock .mk-live-badge {
+    position: absolute; top: 12px; left: 12px;
+    background: #ed4245; color: #fff; font-size: 10px; font-weight: 600;
+    padding: 4px 8px; border-radius: 4px; letter-spacing: 0.12em;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .journey-mock .mk-live-badge::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%; background: #fff;
+    animation: pulse-dot 1.4s infinite;
+  }
+  .journey-mock .mk-live-viewers {
+    position: absolute; top: 12px; right: 12px;
+    background: rgba(0,0,0,0.45); color: #fff; font-size: 11px;
+    padding: 4px 10px; border-radius: 4px;
+  }
+  .journey-mock .mk-danmaku {
+    position: absolute; left: 0; right: 0; pointer-events: none;
+    overflow: hidden;
+  }
+  .journey-mock .mk-danmaku .dm {
+    position: absolute; white-space: nowrap; color: #fff;
+    font-size: 13px; text-shadow: 0 1px 2px rgba(0,0,0,0.7);
+    animation: dm-fly 8s linear infinite;
+  }
+  .journey-mock .mk-danmaku .dm:nth-child(1) { top: 22%; animation-delay: 0s; }
+  .journey-mock .mk-danmaku .dm:nth-child(2) { top: 38%; animation-delay: 2.5s; color: #ffe066; }
+  .journey-mock .mk-danmaku .dm:nth-child(3) { top: 54%; animation-delay: 5s; color: #8eaaff; }
+  .journey-mock .mk-danmaku .dm:nth-child(4) { top: 70%; animation-delay: 7s; }
+  @keyframes dm-fly {
+    from { transform: translateX(100%); }
+    to   { transform: translateX(-100%); }
+  }
+  .journey-mock .mk-rtmp {
+    display: flex; flex-direction: column; gap: 8px;
+    background: var(--bg-3); border-radius: 10px; padding: 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+  }
+  .journey-mock .mk-rtmp-label { color: var(--ink-4); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
+  .journey-mock .mk-rtmp-val { color: var(--ink-1); word-break: break-all; }
+  @keyframes pulse-ring {
+    0%   { box-shadow: 0 0 0 0 rgba(58,100,238,0.4); }
+    100% { box-shadow: 0 0 0 30px rgba(58,100,238,0); }
+  }
+  .journey-mock .mk-call .mk-status {
+    color: var(--accent-green); font-size: 13px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .journey-mock .mk-call .mk-status::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent-green); animation: pulse-dot 1.4s infinite;
+  }
+  /* Stage 0: form mock */
+  .journey-mock .mk-form input,
+  .journey-mock .mk-form .mk-input {
+    width: 100%; padding: 12px 14px; border-radius: 10px;
+    background: var(--bg-3); border: 1px solid rgba(255,255,255,0.08);
+    color: var(--ink-2); font-size: 13px; font-family: inherit;
+    margin-bottom: 12px;
+  }
+  .journey-mock .mk-btn {
+    width: 100%; padding: 12px; border-radius: 10px;
+    background: var(--brand-500); color: #fff; font-size: 13px;
+    border: 0; cursor: pointer;
+  }
+
+  /* Center-top hint that nudges the user to keep scrolling */
+  .journey-hint {
+    position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
+    font-size: 11px; color: var(--ink-4); letter-spacing: 0.2em;
+    text-transform: uppercase; display: flex; flex-direction: column;
+    align-items: center; gap: 6px; pointer-events: none; opacity: 0.6;
+  }
+  .journey-hint::after {
+    content: "↓"; font-size: 16px; animation: bob 1.6s infinite;
+  }
+  @keyframes bob {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(6px); }
+  }
+
+  @media (max-width: 880px) {
+    .journey-stage { grid-template-columns: 1fr; padding: 80px 24px 60px; gap: 24px; }
+    .journey-visual { aspect-ratio: 4 / 3; }
+  }
+
+  /* === Section number labels === */
+  .section-num {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px; color: var(--ink-4); letter-spacing: 0.25em;
+    margin-bottom: 8px; display: block;
+  }
+  .section-num .n { color: var(--brand-300); }
+
+  /* ===== Hero ===== */
+  .hero {
+    position: relative;
+    background:
+      radial-gradient(1100px 600px at 0% -10%, rgba(58,100,238,0.20) 0%, transparent 60%),
+      radial-gradient(900px 500px at 100% 110%, rgba(58,100,238,0.12) 0%, transparent 55%),
+      var(--bg-1);
+    padding: 80px 24px 0;
+    overflow: hidden;
+  }
+  .hero-inner { display: grid; grid-template-columns: 1.05fr 1fr; gap: 56px; align-items: center; }
+  .hero-cta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .hero-os {
+    margin-top: 18px; font-size: 12px; color: var(--ink-4);
+  }
+  .hero-os b { color: var(--ink-2); font-weight: 500; }
+  .hero-shot {
+    border-radius: 18px;
+    background:
+      linear-gradient(160deg, var(--bg-3) 0%, var(--bg-2) 100%);
+    border: 1px solid rgba(58,65,80,0.5);
+    box-shadow: 0 30px 80px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.02) inset;
+    overflow: hidden; aspect-ratio: 16/10;
+    position: relative;
+    transform-style: preserve-3d; will-change: transform;
+    transition: transform .2s ease-out, box-shadow .3s ease;
+  }
+  body.has-3d .hero-shot {
+    transform: perspective(1400px) rotateY(-8deg) rotateX(4deg);
+    box-shadow: -30px 40px 100px rgba(0,0,0,0.6),
+                 30px 0 80px rgba(58,100,238,0.10);
+  }
+  body.has-3d .hero-shot:hover {
+    transform: perspective(1400px) rotateY(-4deg) rotateX(2deg) translateZ(20px);
+  }
+  /* Real product screenshot. Falls back to the CSS mock below if the
+     image is missing (the <img> just renders broken). */
+  .hero-shot img.real-shot {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%; object-fit: cover;
+    z-index: 2;
+  }
+  .hero-shot::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      radial-gradient(circle at 30% 40%, rgba(58,100,238,0.18) 0%, transparent 50%),
+      radial-gradient(circle at 80% 70%, rgba(58,100,238,0.10) 0%, transparent 50%);
+  }
+  .hero-mock {
+    position: absolute; inset: 16px; border-radius: 12px; overflow: hidden;
+    display: grid; grid-template-columns: 200px 1fr; background: var(--bg-2);
+    border: 1px solid rgba(58,65,80,0.5);
+  }
+  .hero-mock .sidebar { background: var(--bg-2); border-right: 1px solid rgba(58,65,80,0.5); padding: 14px 10px; font-size: 11px; }
+  .hero-mock .sidebar .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; color: var(--ink-2); margin-bottom: 4px; }
+  .hero-mock .sidebar .row.active { background: rgba(58,100,238,0.18); color: var(--ink-1); }
+  .hero-mock .sidebar .avatar { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; }
+  .hero-mock .panel { padding: 18px 18px 0; background: var(--bg-1); display: flex; flex-direction: column; }
+  .hero-mock .panel .head { font-size: 12px; color: var(--ink-3); padding-bottom: 12px; border-bottom: 1px solid rgba(58,65,80,0.4); }
+  .hero-mock .panel .head b { color: var(--ink-1); font-size: 13px; display: block; }
+  .hero-mock .panel .msgs { flex: 1; padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .hero-mock .bubble {
+    max-width: 70%; padding: 8px 11px; border-radius: 14px; font-size: 12px; line-height: 1.5;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.18);
+  }
+  .hero-mock .bubble.them { background: var(--bg-3); color: var(--ink-1); align-self: flex-start; border-bottom-left-radius: 5px; }
+  .hero-mock .bubble.me { background: var(--brand-500); color: #fff; align-self: flex-end; border-bottom-right-radius: 5px; }
+
+  /* ===== Features ===== */
+  .features { background: var(--bg-2); border-top: 1px solid rgba(58,65,80,0.4); border-bottom: 1px solid rgba(58,65,80,0.4); }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .card {
+    background: var(--bg-1);
+    border: 1px solid rgba(58,65,80,0.4);
+    border-radius: 14px;
+    padding: 24px 22px;
+    transition: border-color .2s ease, transform .15s ease-out, box-shadow .2s ease;
+    transform-style: preserve-3d;
+    will-change: transform;
+  }
+  .card:hover { border-color: rgba(58,100,238,0.6); }
+  /* 3D tilt — JS sets the rotation via inline transform on pointermove.
+     When the pointer leaves we clear the inline style and this default
+     translate kicks in. */
+  body.has-3d .card { box-shadow: 0 4px 18px rgba(0,0,0,0.25); }
+  body.has-3d .card:hover { box-shadow: 0 12px 32px rgba(58,100,238,0.18); }
+  .card .icon {
+    width: 44px; height: 44px; border-radius: 10px;
+    background: rgba(58,100,238,0.15); color: var(--brand-300);
+    display: inline-flex; align-items: center; justify-content: center;
+    margin-bottom: 14px;
+  }
+  .card .icon svg { width: 22px; height: 22px; }
+  .card h3 { font-size: 17px; margin-bottom: 6px; }
+  .card p { font-size: 14px; color: var(--ink-3); }
+
+  /* ===== Download ===== */
+  .download { background: var(--bg-1); }
+  .dl-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 28px; }
+  .dl-card {
+    background: var(--bg-2); border: 1px solid rgba(58,65,80,0.4); border-radius: 14px;
+    padding: 22px 20px; text-align: center;
+    transition: border-color .2s ease, transform .15s ease-out, box-shadow .2s ease;
+    transform-style: preserve-3d; will-change: transform;
+  }
+  .dl-card.featured { border-color: var(--brand-500); box-shadow: 0 0 0 2px rgba(58,100,238,0.25); }
+  .dl-card:hover { border-color: rgba(58,100,238,0.6); }
+  body.has-3d .dl-card { box-shadow: 0 4px 18px rgba(0,0,0,0.25); }
+  body.has-3d .dl-card:hover { box-shadow: 0 14px 36px rgba(58,100,238,0.22); }
+  .dl-card .os-icon {
+    width: 44px; height: 44px; margin: 2px auto 14px;
+    display: block; color: var(--brand-300);
+  }
+  .dl-card:hover .os-icon { color: var(--brand-200); }
+  .dl-card h4 { font-size: 16px; margin-bottom: 4px; }
+  .dl-card .sub { color: var(--ink-3); font-size: 12px; margin-bottom: 14px; }
+  .dl-card a.btn { width: 100%; }
+
+  /* ===== Install help (collapsed by default) ===== */
+  .install-help {
+    margin: 32px auto 0; max-width: 880px; text-align: left;
+    background: var(--bg-2); border: 1px solid rgba(58,65,80,0.5);
+    border-radius: 14px;
+  }
+  .install-help summary {
+    cursor: pointer; padding: 16px 22px; list-style: none;
+    color: var(--ink-2); font-size: 14px; font-weight: 500;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .install-help summary::-webkit-details-marker { display: none; }
+  .install-help summary::before {
+    content: "▸"; color: var(--brand-300); font-size: 12px;
+    transition: transform .15s ease;
+  }
+  .install-help[open] summary::before { transform: rotate(90deg); }
+  .install-help summary strong { color: var(--brand-300); font-weight: 600; }
+  .install-help-body {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 28px;
+    padding: 4px 22px 22px;
+    border-top: 1px solid rgba(58,65,80,0.4); padding-top: 22px;
+  }
+  .install-help h4 {
+    font-size: 15px; margin-bottom: 10px; color: var(--ink-1);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .install-help .ih-os { width: 20px; height: 20px; color: var(--brand-300); flex-shrink: 0; }
+  .install-help ol { padding-left: 22px; color: var(--ink-2); font-size: 14px; }
+  .install-help li { margin-bottom: 8px; line-height: 1.55; }
+  .install-help p { color: var(--ink-3); font-size: 13px; margin-top: 10px; }
+  .install-help pre {
+    background: var(--bg-4); border: 1px solid rgba(58,65,80,0.5);
+    padding: 10px 12px; border-radius: 8px; margin: 8px 0;
+    overflow-x: auto;
+  }
+  .install-help code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px; color: var(--ink-1);
+  }
+  .install-help p code, .install-help li code {
+    background: var(--bg-3); padding: 1px 6px; border-radius: 5px;
+    border: 1px solid rgba(58,65,80,0.4);
+  }
+  @media (max-width: 700px) {
+    .install-help-body { grid-template-columns: 1fr; gap: 20px; }
+  }
+
+  /* ===== Quick start ===== */
+  .quickstart ol { padding-left: 22px; margin-top: 18px; color: var(--ink-2); }
+  .quickstart li { margin-bottom: 10px; }
+  .quickstart code,
+  .guide code, .guide kbd {
+    background: var(--bg-3); padding: 2px 7px; border-radius: 6px;
+    border: 1px solid rgba(58,65,80,0.4);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;
+  }
+  .guide kbd { font-size: 12px; padding: 1px 6px; }
+
+  /* ===== Detailed guide grid ===== */
+  .guide { background: var(--bg-1); border-top: 1px solid rgba(58,65,80,0.4); }
+  .guide-tagline { color: var(--ink-3); text-align: center; max-width: 640px; margin: 12px auto 0; }
+  .guide-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+    margin-top: 36px; max-width: 980px; margin-left: auto; margin-right: auto;
+  }
+  .guide-card {
+    background: var(--bg-2); border: 1px solid rgba(58,65,80,0.45);
+    border-radius: 14px; padding: 0;
+    transition: border-color .15s ease, transform .15s ease-out, box-shadow .2s ease;
+    transform-style: preserve-3d; will-change: transform;
+  }
+  .guide-card[open] { border-color: rgba(58,100,238,0.5); }
+  body.has-3d .guide-card { box-shadow: 0 4px 18px rgba(0,0,0,0.25); }
+  body.has-3d .guide-card:hover { box-shadow: 0 12px 32px rgba(58,100,238,0.18); }
+  .guide-card summary {
+    cursor: pointer; padding: 18px 22px; list-style: none;
+    display: flex; align-items: center; gap: 14px;
+    color: var(--ink-1); font-weight: 500; font-size: 15px;
+  }
+  .guide-card summary::-webkit-details-marker { display: none; }
+  .guide-card summary::after {
+    content: "▸"; margin-left: auto; color: var(--ink-4); font-size: 12px;
+    transition: transform .15s ease;
+  }
+  .guide-card[open] summary::after { transform: rotate(90deg); color: var(--brand-300); }
+  .guide-card summary svg.guide-icon { width: 22px; height: 22px; color: var(--brand-300); flex: 0 0 22px; }
+  .guide-card-body {
+    padding: 0 22px 22px; border-top: 1px solid rgba(58,65,80,0.35);
+    padding-top: 16px; color: var(--ink-2); font-size: 14px; line-height: 1.65;
+  }
+  .guide-card-body p { margin: 8px 0; }
+  .guide-card-body p:first-child { margin-top: 0; }
+  .guide-card-body ul, .guide-card-body ol {
+    padding-left: 20px; margin: 8px 0;
+  }
+  .guide-card-body li { margin-bottom: 5px; }
+  .guide-card-body strong { color: var(--ink-1); font-weight: 600; }
+  .guide-card-body em {
+    font-style: normal; color: var(--brand-300);
+  }
+  .guide-card-body .tip {
+    background: rgba(58,100,238,0.08);
+    border-left: 3px solid var(--brand-500);
+    padding: 8px 12px; border-radius: 6px; margin-top: 12px;
+    color: var(--ink-2); font-size: 13px;
+  }
+  .guide-card-body .warn {
+    background: rgba(237,125,43,0.08);
+    border-left: 3px solid var(--accent-orange, #ed7d2b);
+    padding: 8px 12px; border-radius: 6px; margin-top: 12px;
+    color: var(--ink-2); font-size: 13px;
+  }
+  @media (max-width: 720px) {
+    .guide-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ===== Register inline ===== */
+  .signup-card {
+    background: var(--bg-2); border: 1px solid rgba(58,65,80,0.5);
+    border-radius: 18px; padding: 32px; max-width: 520px; margin: 0 auto;
+  }
+  .signup-card h2 { margin-bottom: 6px; }
+  .signup-card p.muted { margin-bottom: 22px; }
+  .signup-card .field { margin-bottom: 14px; }
+  .signup-card label { display: block; font-size: 12px; color: var(--ink-3); margin-bottom: 6px; }
+  .signup-card input {
+    width: 100%; padding: 11px 13px; border-radius: 10px;
+    background: var(--bg-4); border: 1px solid rgba(58,65,80,0.6);
+    color: var(--ink-1); font-size: 14px; outline: none;
+    transition: border-color .15s ease;
+  }
+  .signup-card input:focus { border-color: var(--brand-500); background: var(--bg-3); }
+  .signup-card button.btn-primary { width: 100%; padding: 13px; margin-top: 4px; }
+  .signup-card .msg { font-size: 13px; margin-top: 14px; padding: 10px 12px; border-radius: 10px; display: none; }
+  .signup-card .msg.error { display: block; color: #ed4245; background: rgba(237,66,69,0.10); border: 1px solid rgba(237,66,69,0.35); }
+  .signup-card .msg.success { display: block; color: var(--accent-green); background: rgba(59,165,92,0.10); border: 1px solid rgba(59,165,92,0.40); }
+
+  /* ===== Footer ===== */
+  footer {
+    padding: 36px 24px;
+    border-top: 1px solid rgba(58,65,80,0.4);
+    color: var(--ink-4); font-size: 13px;
+    text-align: center; background: var(--bg-1);
+  }
+  footer a { color: var(--ink-3); }
+  footer .links { margin-bottom: 8px; }
+  footer .links a { margin: 0 12px; }
+
+  @media (max-width: 900px) {
+    .hero-inner { grid-template-columns: 1fr; gap: 32px; }
+    .grid-3 { grid-template-columns: 1fr; }
+    .dl-grid { grid-template-columns: 1fr 1fr; }
+    .nav-inner > a.lk { display: none; }
+    section { padding: 56px 18px; }
+  }
+</style>
+
+<!-- Import map lets us write `import * as THREE from 'three'` in a plain
+     module script tag, no bundler required. esm.sh resolves three's
+     own internal `import './...js'` paths automatically. -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js"
+  }
+}
+</script>
+<!-- GSAP + ScrollTrigger (UMD globals) — used for scroll-pinned journey
+     section. Deferred so they don't block first paint. Loads from same
+     CDN as three.js to keep DNS warm. -->
+<script defer src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
+</head>
+<body>
+
+<!-- 3D background canvas. JS adds <body class="has-3d"> once WebGL is up.
+     Without WebGL the canvas stays transparent and the original CSS
+     gradient hero background remains the only thing the user sees. -->
+<canvas id="three-bg" aria-hidden="true"></canvas>
+
+<!-- Right-edge scroll progress dots — fixed nav showing where you are
+     in the page. Click to jump. Highlighted dot tracks IntersectionObserver. -->
+<aside class="scroll-progress" id="scroll-progress" aria-label="页面导航">
+  <a href="#hero"        data-label="开始"></a>
+  <a href="#features"    data-label="功能"></a>
+  <a href="#download"    data-label="下载"></a>
+  <a href="#quickstart"  data-label="快速开始"></a>
+  <a href="#guide"       data-label="使用指南"></a>
+  <a href="#signup"      data-label="注册"></a>
+</aside>
+
+<!--
+  Inline SVG sprite — every <use href="#…"/> below pulls a symbol from
+  web/img/icons.svg via an extra HTTP GET on first reference. We could
+  also embed the sprite here for one fewer request; left external so the
+  icon file is reusable by other pages later.
+-->
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#" class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <rect width="24" height="24" rx="5.5" fill="#3a64ee"/>
+          <path d="M5.5 7 H16.5 a2 2 0 0 1 2 2 V13.5 a2 2 0 0 1 -2 2 H11.5 L8.5 18 V15.5 H5.5 a2 2 0 0 1 -2 -2 V9 a2 2 0 0 1 2 -2 Z" fill="#ffffff"/>
+          <circle cx="8.7" cy="11.2" r="0.95" fill="#3a64ee"/>
+          <circle cx="11.6" cy="11.2" r="0.95" fill="#3a64ee"/>
+          <circle cx="14.5" cy="11.2" r="0.95" fill="#3a64ee"/>
+          <circle cx="19" cy="5" r="2" fill="#ef4444"/>
+          <circle cx="19" cy="5" r="0.7" fill="#ffffff"/>
+        </svg>
+      </span>
+      东风快信
+    </a>
+    <a class="lk" href="#features">功能</a>
+    <a class="lk" href="#download">下载</a>
+    <a class="lk" href="#quickstart">快速开始</a>
+    <a class="lk" href="#guide">使用指南</a>
+    <a class="lk" href="#signup">注册</a>
+    <div class="nav-cta">
+      <a class="btn btn-ghost" href="#signup">登录</a>
+      <a class="btn btn-primary" href="#download">下载客户端</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="hero">
+  <div class="container hero-inner">
+    <div>
+      <div class="hero-loading" id="hero-loading" aria-hidden="true">
+        <div class="hl-line"><span class="dot"></span>正在连接服务器<span class="v"> · app.dfchat.chat</span></div>
+        <div class="hl-line"><span class="dot"></span>同步会话与好友列表<span class="v"> · 2 个设备在线</span></div>
+        <div class="hl-line"><span class="dot"></span><span class="v">就绪</span></div>
+      </div>
+      <span class="eyebrow reveal">东方信息 · v0.1.2</span>
+      <h1 class="reveal reveal-1">团队沟通的<br/><span style="color: var(--brand-300);">桌面版微信</span></h1>
+      <p class="lead reveal reveal-2">
+        PC 端实时聊天 + 高清语音 / 视频 / 屏幕共享 + 直播弹幕。
+        私聊、群组、频道、文件传输、表情反应、撤回、@提及，全部一站搞定。
+        Windows / macOS / Linux 三端通用。
+      </p>
+      <div class="hero-cta reveal reveal-3">
+        <a class="btn btn-primary btn-lg" href="#download" id="cta-download">⬇ 下载客户端</a>
+        <a class="btn btn-secondary btn-lg" href="#signup">免费注册</a>
+      </div>
+      <div class="hero-os reveal reveal-4" id="hero-os">检测到你的系统：<b>—</b></div>
+    </div>
+
+    <div class="hero-shot reveal reveal-2" aria-hidden="true">
+      <!--
+        Flat illustration of the chat UI. /img/hero-shot.svg covers the
+        CSS mock below. If the file is missing the <img> silently hides
+        via onerror, letting the mock show through.
+      -->
+      <img class="real-shot" src="/img/hero-shot.svg" alt=""
+           onerror="this.remove()" />
+      <div class="hero-mock">
+        <div class="sidebar">
+          <div class="row"><span class="avatar" style="background:#6f4dd1;"></span>张老师</div>
+          <div class="row active"><span class="avatar" style="background:#3a64ee;"></span>设计师 Lily</div>
+          <div class="row"><span class="avatar" style="background:#3ba55c;"></span>项目讨论群</div>
+          <div class="row"><span class="avatar" style="background:#ed7d2b;"></span># general</div>
+          <div class="row"><span class="avatar" style="background:#a64dd1;"></span># random</div>
+        </div>
+        <div class="panel">
+          <div class="head"><b>设计师 Lily</b><span>在线</span></div>
+          <div class="msgs">
+            <div class="bubble them">原型图发你了，第二页的按钮要不要再大一点？</div>
+            <div class="bubble me">收到，我现在改</div>
+            <div class="bubble them">👍 辛苦</div>
+            <div class="bubble me">改完截屏给你看 📎</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ============================================================
+     Journey: 4-stage scroll-pinned product walkthrough
+     ============================================================
+     GSAP ScrollTrigger pins .journey-stage while the user scrolls
+     through .journey-track (5 viewports). progress 0→1 maps to four
+     stages; we add .active to the matching .journey-step + .journey-mock.
+
+     Inspired by https://www.bluemarinefoundation.com/the-sea-we-breathe/
+     where each chapter is pinned and unfolds as you scroll.
+-->
+<section class="journey" id="journey" aria-label="产品演示">
+  <div class="journey-track" id="journey-track">
+    <div class="journey-stage">
+      <div class="journey-text">
+        <div class="journey-progress">
+          <span><span id="journey-step-num">01</span> / 05</span>
+          <span class="bar" id="journey-bar"></span>
+          <span id="journey-pct">20%</span>
+        </div>
+        <div class="journey-step active" data-step="0">
+          <span class="eyebrow">第一步 · 注册</span>
+          <h2>30 秒注册，多端同步</h2>
+          <p class="lead">
+            用户名、邮箱、密码三个字段，不需要手机号。注册完客户端自动登录，
+            电脑 / Mac / Linux 多设备同时在线互不干扰。
+          </p>
+        </div>
+        <div class="journey-step" data-step="1">
+          <span class="eyebrow">第二步 · 添加好友</span>
+          <h2>用户名一搜就到</h2>
+          <p class="lead">
+            侧栏「+」输入对方用户名 → 发送好友请求 → 对方接受。
+            群组直接粘贴邀请码加入，无需通过率审核。
+          </p>
+        </div>
+        <div class="journey-step" data-step="2">
+          <span class="eyebrow">第三步 · 开始聊天</span>
+          <h2>消息、图片、文件、@ 提及</h2>
+          <p class="lead">
+            Markdown 简写、引用回复、表情反应、撤回、置顶。
+            拖文件进对话框即上传，⌘V 粘贴截图直接发。
+          </p>
+        </div>
+        <div class="journey-step" data-step="3">
+          <span class="eyebrow">第四步 · 视频通话</span>
+          <h2>一键发起，720p 直连</h2>
+          <p class="lead">
+            会话右上角点视频图标即开通话，对方收到来电弹窗。WebRTC P2P 直连，
+            对称 NAT 自动 fallback TURN 中继。屏幕共享一键切换。
+          </p>
+        </div>
+        <div class="journey-step" data-step="4">
+          <span class="eyebrow">第五步 · 开播直播</span>
+          <h2>OBS 推流，HLS + 弹幕</h2>
+          <p class="lead">
+            创建直播间生成 RTMP URL + 推流密钥，复制到 OBS 即可开播。
+            观众端 HLS 自适应播放，实时弹幕飞过画面，结束自动 DVR 录制供回放。
+          </p>
+        </div>
+      </div>
+
+      <div class="journey-visual">
+        <!-- 5 AI-generated stage mocks. Same .journey-mock active/inactive
+             machinery as before — the JS just adds/removes .active by index. -->
+        <img class="journey-mock journey-img active" data-mock="0"
+             src="/img/journey-register.svg" alt="注册界面" loading="lazy" />
+        <img class="journey-mock journey-img" data-mock="1"
+             src="/img/journey-friends.svg" alt="好友列表" loading="lazy" />
+        <img class="journey-mock journey-img" data-mock="2"
+             src="/img/journey-chat.svg" alt="聊天对话" loading="lazy" />
+        <img class="journey-mock journey-img" data-mock="3"
+             src="/img/journey-call.svg" alt="视频通话" loading="lazy" />
+        <img class="journey-mock journey-img" data-mock="4"
+             src="/img/journey-live.svg" alt="直播间" loading="lazy" />
+      </div>
+
+      <div class="journey-hint" id="journey-hint">继续滚动看下一步</div>
+    </div>
+  </div>
+</section>
+
+<section class="features" id="features">
+  <div class="container">
+    <span class="section-num reveal"><span class="n">02</span> · 核心功能</span>
+    <span class="eyebrow reveal reveal-1">为什么是东风快信</span>
+    <h2 class="reveal reveal-2">把团队沟通的一切都装进一个客户端</h2>
+    <p class="lead reveal reveal-3">不用切换应用、不用复制粘贴文件、不用为了视频会议另外下软件。</p>
+    <div class="grid-3" style="margin-top: 36px;">
+      <div class="card reveal"><div class="icon"><svg><use href="/img/icons.svg#chat"/></svg></div>     <h3>实时聊天</h3><p>私聊、群组、Discord 风格的多频道服务器，断线自动重连，离线消息自动补齐。</p></div>
+      <div class="card reveal"><div class="icon"><svg><use href="/img/icons.svg#call"/></svg></div>     <h3>高清通话</h3><p>一对一语音 + 视频 + 屏幕共享，WebRTC 直连，画面 720p 起步。</p></div>
+      <div class="card reveal"><div class="icon"><svg><use href="/img/icons.svg#file"/></svg></div>     <h3>文件传输</h3><p>拖拽上传、粘贴上传、最高 100MB 单文件。图片自动缩略图。</p></div>
+      <div class="card reveal"><div class="icon"><svg><use href="/img/icons.svg#search"/></svg></div>   <h3>全文搜索</h3><p>⌘K 一键搜遍所有会话历史，中英文都能搜。点击直接跳到原消息。</p></div>
+      <div class="card reveal"><div class="icon"><svg><use href="/img/icons.svg#notify"/></svg></div>   <h3>桌面通知</h3><p>窗口未聚焦时系统通知 + Dock 角标，免打扰模式按会话级别设置。</p></div>
+      <div class="card reveal"><div class="icon"><svg><use href="/img/icons.svg#reaction"/></svg></div> <h3>表情反应</h3><p>给消息加 emoji 反应、引用回复、撤回、@提及 + 高亮、消息置顶。</p></div>
+      <div class="card reveal"><div class="icon"><svg><use href="/img/icons.svg#security"/></svg></div> <h3>账号安全</h3><p>JWT + 刷新令牌、多设备会话管理、强制下线、改密码、黑名单、注销账号。</p></div>
+      <div class="card reveal"><div class="icon"><svg><use href="/img/icons.svg#role"/></svg></div>     <h3>群组权限</h3><p>群主 / 管理员 / 成员三级 RBAC，可建频道、删频道、踢人、升降管理员。</p></div>
+      <div class="card reveal"><div class="icon"><svg><use href="/img/icons.svg#tls"/></svg></div>      <h3>端到端 TLS</h3><p>所有流量走 HTTPS / WSS，文件存储 MinIO 强加密，密码 bcrypt 12 轮。</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="download" id="download">
+  <div class="container" style="text-align: center;">
+    <span class="section-num reveal"><span class="n">03</span> · 下载</span>
+    <span class="eyebrow reveal reveal-1">免费下载</span>
+    <h2 class="reveal reveal-2">选择你的系统</h2>
+    <p class="lead muted reveal reveal-3" style="margin: 12px auto 0;">轻量级，安装包 &lt; 100MB。首次启动连接服务器，5 秒后即可使用。</p>
+    <div class="dl-grid">
+      <div class="dl-card reveal" id="dl-mac-arm">
+        <svg class="os-icon" aria-hidden="true"><use href="/img/icons.svg#apple"/></svg>
+        <h4>macOS Apple Silicon</h4>
+        <div class="sub">M1 / M2 / M3 / M4 系列</div>
+        <a class="btn btn-primary" href="/download/DFCHAT-mac-arm64.dmg">⬇ .dmg</a>
+      </div>
+      <div class="dl-card reveal" id="dl-mac-x64">
+        <svg class="os-icon" aria-hidden="true"><use href="/img/icons.svg#apple"/></svg>
+        <h4>macOS Intel</h4>
+        <div class="sub">Intel x86_64</div>
+        <a class="btn btn-primary" href="/download/DFCHAT-mac-x64.dmg">⬇ .dmg</a>
+      </div>
+      <div class="dl-card reveal" id="dl-win">
+        <svg class="os-icon" aria-hidden="true"><use href="/img/icons.svg#windows"/></svg>
+        <h4>Windows</h4>
+        <div class="sub">Win 10 / 11 (x64) · 安装向导</div>
+        <a class="btn btn-primary" href="/download/DFCHAT-win-x64.exe">⬇ .exe</a>
+      </div>
+      <div class="dl-card reveal" id="dl-linux">
+        <svg class="os-icon" aria-hidden="true"><use href="/img/icons.svg#linux"/></svg>
+        <h4>Linux</h4>
+        <div class="sub">AppImage (x64)</div>
+        <a class="btn btn-primary" href="/download/DFCHAT-linux.AppImage">⬇ AppImage</a>
+      </div>
+    </div>
+    <details class="install-help" id="install-help">
+      <summary>
+        安装时提示 <strong>"已损坏"</strong> / <strong>"无法验证"</strong> / <strong>"有风险"</strong>？点这里查看解决步骤
+      </summary>
+      <div class="install-help-body">
+        <div>
+          <h4><svg class="ih-os" aria-hidden="true"><use href="/img/icons.svg#apple"/></svg>macOS</h4>
+          <p style="margin-top: 0;">这是系统的 Gatekeeper 在阻止未签名应用（我们的 Apple Developer 证书正在准备中）。请按以下步骤跳过：</p>
+          <ol>
+            <li>把 <code>东风快信.app</code> 拖入「应用程序」文件夹</li>
+            <li>打开「终端」（Spotlight 搜索 <code>Terminal</code>），粘贴这条命令并回车：
+              <pre><code>sudo xattr -dr com.apple.quarantine /Applications/东风快信.app</code></pre>
+            </li>
+            <li>输入开机密码（屏幕不会显示，盲打）回车</li>
+            <li>正常双击启动东风快信</li>
+          </ol>
+          <p>仍报「已损坏」或闪退？再执行一次：</p>
+          <pre><code>sudo codesign --force --deep --sign - /Applications/东风快信.app</code></pre>
+        </div>
+        <div>
+          <h4><svg class="ih-os" aria-hidden="true"><use href="/img/icons.svg#windows"/></svg>Windows</h4>
+          <p style="margin-top: 0;">双击 <code>DFCHAT-win-x64.exe</code>，若弹出 SmartScreen 蓝框：</p>
+          <ol>
+            <li>点击蓝框里的 <strong>"更多信息"</strong></li>
+            <li>点击下方出现的 <strong>"仍要运行"</strong> 按钮</li>
+          </ol>
+          <p>之后是常规安装向导，下一步到底即可。装完桌面会出现快捷方式，开始菜单也有「东风快信」。</p>
+          <p style="font-size: 12px; color: var(--ink-4);">Defender 误删 exe？打开「Windows 安全中心 → 病毒和威胁防护 → 保护历史记录」恢复并加白名单。</p>
+        </div>
+      </div>
+    </details>
+    <p class="muted" style="font-size: 12px; margin-top: 18px;">
+      正式版会附带 Apple Developer ID 公证 + Windows OV 代码签名，届时所有警告会自动消失。
+    </p>
+  </div>
+</section>
+
+<section class="quickstart" id="quickstart">
+  <div class="container">
+    <span class="section-num reveal"><span class="n">04</span> · 快速开始</span>
+    <span class="eyebrow reveal reveal-1">快速开始</span>
+    <h2 class="reveal reveal-2">3 分钟跑通</h2>
+    <ol>
+      <li>下载并安装客户端</li>
+      <li>点击「立即注册」填写用户名 / 邮箱 / 密码</li>
+      <li>侧栏 + 添加好友（输入对方用户名）或建一个群组</li>
+      <li>开始聊天、发送图片文件、发起 <code>📞</code> 语音 / <code>📹</code> 视频通话</li>
+      <li>⌘K (Mac) / Ctrl+K (Win) 全局搜索消息历史</li>
+    </ol>
+    <p class="muted" style="margin-top: 16px;">
+      已有账号？打开客户端登录页面输入即可。忘记密码请联系管理员重置（暂不支持邮箱找回）。
+    </p>
+  </div>
+</section>
+
+<section class="guide" id="guide">
+  <div class="container">
+    <span class="section-num reveal"><span class="n">05</span> · 使用指南</span>
+    <span class="eyebrow reveal reveal-1">使用指南</span>
+    <h2 class="reveal reveal-2">详细功能说明</h2>
+    <p class="guide-tagline reveal reveal-3">点击每张卡片展开。读完一遍大约 8 分钟，能熟练用上 90% 的功能。</p>
+
+    <div class="guide-grid">
+
+      <details class="guide-card reveal">
+        <summary>
+          <svg class="guide-icon" aria-hidden="true"><use href="/img/icons.svg#chat"/></svg>
+          注册与登录
+        </summary>
+        <div class="guide-card-body">
+          <p>客户端首屏点击 <strong>「立即注册」</strong>，或在本网站下方 <a href="#signup">免费注册</a> 区域填表。</p>
+          <ul>
+            <li><strong>用户名</strong>：3–32 位字母 / 数字 / 下划线，用于登录与好友查找，<em>注册后不能改</em></li>
+            <li><strong>邮箱</strong>：用于未来找回密码（暂不支持自助找回）</li>
+            <li><strong>密码</strong>：至少 8 位，密码框旁的 <kbd>👁</kbd> 可切换显隐</li>
+            <li><strong>昵称</strong>：可选，显示给好友看，可随时修改</li>
+          </ul>
+          <p>注册成功后客户端自动登录，下次启动保持登录状态。多设备同时登录互不冲突，每台设备一个独立 token。</p>
+          <div class="tip">忘记密码或被踢出？联系群主或管理员重置（在「设置 → 安全」也能强制下线其他设备）。</div>
+        </div>
+      </details>
+
+      <details class="guide-card reveal">
+        <summary>
+          <svg class="guide-icon" aria-hidden="true"><use href="/img/icons.svg#role"/></svg>
+          添加好友 / 加入群组
+        </summary>
+        <div class="guide-card-body">
+          <p>侧栏顶部 <strong>「+」</strong> 按钮聚合所有入口。</p>
+          <ul>
+            <li><strong>添加好友</strong>：输入对方用户名 → 发送好友请求，对方接受后出现在侧栏好友列表</li>
+            <li><strong>创建群组</strong>：填群名称、公开/私密、最大人数 → 系统自动生成<em>邀请码</em>分享给朋友</li>
+            <li><strong>加入群组</strong>：拿到邀请码后粘贴即可</li>
+            <li><strong>群内频道</strong>：Discord 风格，群主 / 管理员可建多个频道（公开 / 私密 / 通知型）</li>
+          </ul>
+          <p>角色三级：<strong>群主</strong>（唯一，可解散）/ <strong>管理员</strong>（可踢人、删消息、建/删频道）/ <strong>成员</strong>。群主可右键群成员升降管理员。</p>
+        </div>
+      </details>
+
+      <details class="guide-card reveal">
+        <summary>
+          <svg class="guide-icon" aria-hidden="true"><use href="/img/icons.svg#reaction"/></svg>
+          发消息
+        </summary>
+        <div class="guide-card-body">
+          <p><strong>基础</strong>：输入框打字，<kbd>↵</kbd> 发送，<kbd>Shift + ↵</kbd> 换行。</p>
+          <ul>
+            <li><strong>@ 提及</strong>：输入 <code>@</code> 弹出好友 / 成员列表，被提及者高亮 + 桌面通知（即使免打扰也会响）</li>
+            <li><strong>引用回复</strong>：右键消息 → <em>引用</em>，对方点击引用框直接跳到原消息</li>
+            <li><strong>编辑</strong>：自己的消息右键 → <em>编辑</em>（5 分钟内）</li>
+            <li><strong>撤回</strong>：自己的消息右键 → <em>撤回</em>（无时限，对方看到「消息已撤回」占位）</li>
+            <li><strong>表情反应</strong>：消息悬停时右下角出现笑脸图标 → 选 emoji，多人可叠加同一表情</li>
+            <li><strong>置顶</strong>：群主 / 管理员右键消息 → <em>置顶</em>，每个会话最多 5 条</li>
+          </ul>
+          <div class="tip">支持 Markdown 简写：<code>**粗体**</code> · <code>*斜体*</code> · <code>`代码`</code> · 三个 backtick 包代码块。</div>
+        </div>
+      </details>
+
+      <details class="guide-card reveal">
+        <summary>
+          <svg class="guide-icon" aria-hidden="true"><use href="/img/icons.svg#file"/></svg>
+          文件 / 图片传输
+        </summary>
+        <div class="guide-card-body">
+          <p>三种上传方式：</p>
+          <ol>
+            <li>点击输入框旁的 <strong>回形针图标</strong> → 选择文件</li>
+            <li><strong>拖拽</strong>文件直接进聊天窗口</li>
+            <li>截图 / 复制图片后 <kbd>⌘V</kbd> / <kbd>Ctrl V</kbd> <strong>粘贴</strong></li>
+          </ol>
+          <p>单文件最大 <strong>100 MB</strong>。图片自动生成缩略图，点击查看大图 + 滚轮缩放。文件存储走 MinIO 对象存储，预签名直传，<em>不经过 API 服务器</em>，速度受用户带宽决定。</p>
+          <div class="warn">直传 7 天后老链接会失效，但消息记录里的图片永久可访问（每次重新签发）。</div>
+        </div>
+      </details>
+
+      <details class="guide-card reveal">
+        <summary>
+          <svg class="guide-icon" aria-hidden="true"><use href="/img/icons.svg#call"/></svg>
+          语音 / 视频通话
+        </summary>
+        <div class="guide-card-body">
+          <p>在好友会话<strong>右上角</strong>点 <kbd>📞</kbd> 语音 / <kbd>📹</kbd> 视频按钮发起。</p>
+          <ul>
+            <li>对方收到来电弹窗（即使最小化也会响铃 + 任务栏闪动）</li>
+            <li>接通后可：<strong>静音</strong>、<strong>关摄像头</strong>、<strong>屏幕共享</strong>、<strong>挂断</strong></li>
+            <li><strong>屏幕共享</strong>：通话中点共享按钮，选「整个屏幕」或「单个窗口」，无需重新协商连接</li>
+          </ul>
+          <p>底层走 WebRTC P2P 直连，画质 720p+。对称 NAT 用户自动 fallback 到 <strong>TURN 中继</strong>（coturn 服务器），公司内网 / 4G 等场景也能打通。</p>
+          <div class="tip">目前只支持 1 对 1 通话。多人会议（SFU）在路线图里。</div>
+        </div>
+      </details>
+
+      <details class="guide-card reveal">
+        <summary>
+          <svg class="guide-icon" aria-hidden="true"><use href="/img/icons.svg#chat"/></svg>
+          直播 + 弹幕
+        </summary>
+        <div class="guide-card-body">
+          <p>侧栏 <kbd>📡</kbd> 直播图标进入直播模块。</p>
+          <ul>
+            <li><strong>广场</strong>：浏览所有正在直播的房间，点封面进观看</li>
+            <li><strong>我的直播</strong>：开播一个新房间，复制：<br/>
+              · 服务器 URL：<code>rtmp://dfchat.chat/live</code><br/>
+              · 推流密钥：系统生成（可一键旋转）<br/>
+              填进 OBS 的「直播 → 自定义」即可</li>
+            <li><strong>观看</strong>：HLS 自适应，弹幕飘过画面 + 右侧时间轴列表</li>
+            <li><strong>历史回放</strong>：直播自动 DVR 录制，结束后在该房间下方点开回看</li>
+          </ul>
+          <div class="tip">推流码千万别泄露，等于把你房间的直播权交给别人。怀疑泄露立即「旋转密钥」生成新的。</div>
+        </div>
+      </details>
+
+      <details class="guide-card reveal">
+        <summary>
+          <svg class="guide-icon" aria-hidden="true"><use href="/img/icons.svg#search"/></svg>
+          全局搜索
+        </summary>
+        <div class="guide-card-body">
+          <p>任何页面按 <kbd>⌘K</kbd>（Mac）/ <kbd>Ctrl K</kbd>（Win / Linux）打开搜索面板。</p>
+          <ul>
+            <li>消息内容（中英文都支持，PostgreSQL 全文索引）</li>
+            <li>联系人 / 群组名 / 频道名</li>
+            <li>文件名（按附件名搜）</li>
+          </ul>
+          <p>点击结果直接跳到该消息上下文，前后各 10 条自动加载。搜索范围 = 所有你<em>能看到</em>的会话历史（不会跨越群组权限）。</p>
+        </div>
+      </details>
+
+      <details class="guide-card reveal">
+        <summary>
+          <svg class="guide-icon" aria-hidden="true"><use href="/img/icons.svg#security"/></svg>
+          设置 / 账号安全
+        </summary>
+        <div class="guide-card-body">
+          <p>左下角头像 → <strong>设置</strong>。</p>
+          <ul>
+            <li><strong>个人资料</strong>：头像、昵称、个人简介</li>
+            <li><strong>安全</strong>：修改密码、查看登录设备 / 强制下线、注销账号</li>
+            <li><strong>通知</strong>：免打扰按会话级别设置，群组可设「仅 @ 提及」</li>
+            <li><strong>外观</strong>：暗色 / 自动主题</li>
+          </ul>
+          <p><strong>多设备会话</strong>：同时在多台电脑登录互不冲突。「安全」页可看到所有活跃设备 + 一键下线异常设备。</p>
+          <div class="warn">注销账号会<strong>永久删除</strong>所有数据：消息、文件、好友关系，无法恢复。</div>
+        </div>
+      </details>
+
+      <details class="guide-card reveal">
+        <summary>
+          <svg class="guide-icon" aria-hidden="true"><use href="/img/icons.svg#tls"/></svg>
+          快捷键速查
+        </summary>
+        <div class="guide-card-body">
+          <ul>
+            <li><kbd>⌘K</kbd> / <kbd>Ctrl K</kbd> — 全局搜索</li>
+            <li><kbd>⌘,</kbd> / <kbd>Ctrl ,</kbd> — 打开设置</li>
+            <li><kbd>↵</kbd> — 发送消息</li>
+            <li><kbd>Shift ↵</kbd> — 输入框换行</li>
+            <li><kbd>↑</kbd>（输入框空时）— 编辑上一条自己的消息</li>
+            <li><kbd>Esc</kbd> — 取消编辑 / 关闭弹窗</li>
+            <li><kbd>@</kbd> — 触发提及补全</li>
+            <li><kbd>:</kbd> — 触发 emoji 补全（如 <code>:smile:</code>）</li>
+            <li><kbd>⌘V</kbd> / <kbd>Ctrl V</kbd> 在聊天框 — 粘贴图片直接发送</li>
+          </ul>
+          <p>通话进行中：</p>
+          <ul>
+            <li><kbd>M</kbd> — 静音切换</li>
+            <li><kbd>V</kbd> — 关 / 开摄像头</li>
+            <li><kbd>⌘Shift H</kbd> / <kbd>Ctrl Shift H</kbd> — 挂断</li>
+          </ul>
+        </div>
+      </details>
+
+    </div>
+  </div>
+</section>
+
+<section id="signup" style="background: var(--bg-2); border-top: 1px solid rgba(58,65,80,0.4);">
+  <div class="container">
+    <div class="signup-card">
+      <h2 class="reveal">免费注册</h2>
+      <p class="muted">不需要手机号。注册完登录客户端即可。</p>
+      <form id="reg-form" autocomplete="off">
+        <div class="field">
+          <label>用户名 <span class="muted">（3-32 位字母数字下划线）</span></label>
+          <input name="username" maxlength="32" required pattern="[A-Za-z0-9_]{3,32}" placeholder="alice" />
+        </div>
+        <div class="field">
+          <label>邮箱</label>
+          <input name="email" type="email" required placeholder="you@example.com" />
+        </div>
+        <div class="field">
+          <label>昵称 <span class="muted">（可选，默认与用户名相同）</span></label>
+          <input name="nickname" maxlength="64" placeholder="" />
+        </div>
+        <div class="field">
+          <label>密码 <span class="muted">（至少 8 位）</span></label>
+          <input name="password" type="password" minlength="8" required placeholder="••••••••" />
+        </div>
+        <button type="submit" class="btn btn-primary">注册并下载客户端</button>
+        <div class="msg" id="reg-msg"></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="links">
+    <a href="#features">功能</a>
+    <a href="#download">下载</a>
+    <a href="#quickstart">快速开始</a>
+    <a href="#guide">使用指南</a>
+    <a href="#signup">注册</a>
+  </div>
+  <div>© 2026 东方信息 · 东风快信 · v0.1.0</div>
+  <div style="margin-top: 6px; font-size: 11px; color: var(--ink-4);">
+    所有流量经 TLS 加密 · 域名 dfchat.chat
+  </div>
+</footer>
+
+<script>
+  const API = 'https://app.dfchat.chat';
+
+  // ----- OS detection — highlight the most likely download -----
+  (function () {
+    const ua = navigator.userAgent;
+    const isMac = /Mac OS X/i.test(ua);
+    const isWin = /Windows/i.test(ua);
+    const isLinux = /Linux/i.test(ua) && !/Android/i.test(ua);
+    const isAppleSilicon = isMac && (
+      /ARM64/.test(navigator.userAgent) ||
+      // Apple Silicon Macs report 8 logical cores by default, but reliable
+      // detection isn't possible from the renderer. Default to ARM64 on Mac
+      // because most newer Macs are.
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints === 0)
+    );
+
+    let label = '未知系统';
+    let target = 'dl-mac-arm';
+    if (isMac) {
+      label = isAppleSilicon ? 'macOS Apple Silicon' : 'macOS';
+      target = isAppleSilicon ? 'dl-mac-arm' : 'dl-mac-x64';
+    } else if (isWin) {
+      label = 'Windows';
+      target = 'dl-win';
+    } else if (isLinux) {
+      label = 'Linux';
+      target = 'dl-linux';
+    }
+
+    const osLine = document.getElementById('hero-os');
+    if (osLine) osLine.innerHTML = '检测到你的系统：<b>' + label + '</b>';
+    const card = document.getElementById(target);
+    if (card) card.classList.add('featured');
+
+    const cta = document.getElementById('cta-download');
+    if (cta && card) {
+      const a = card.querySelector('a.btn');
+      if (a) cta.setAttribute('href', a.getAttribute('href'));
+    }
+  })();
+
+  // ----- Inline register form -----
+  const form = document.getElementById('reg-form');
+  const msg  = document.getElementById('reg-msg');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    msg.className = 'msg';
+    msg.textContent = '';
+    const data = Object.fromEntries(new FormData(form));
+    if (!data.nickname) data.nickname = data.username;
+    try {
+      const res = await fetch(API + '/api/v1/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        msg.classList.add('error');
+        msg.textContent = body.message || ('注册失败 HTTP ' + res.status);
+        return;
+      }
+      msg.classList.add('success');
+      msg.textContent = '注册成功！现在请下载客户端登录。';
+      form.querySelector('button').textContent = '✓ 已注册';
+      setTimeout(() => {
+        document.getElementById('download').scrollIntoView({ behavior: 'smooth' });
+      }, 800);
+    } catch (err) {
+      msg.classList.add('error');
+      msg.textContent = '网络错误，请检查连接：' + (err.message || err);
+    }
+  });
+</script>
+
+<!-- ============================================================
+     3D enhancements — Three.js background scene + card tilt
+     ============================================================
+     Two opt-in layers:
+       1. A WebGL canvas behind the hero with ~90 floating brand-coloured
+          shapes (wireframe + solid mix), responding to mouse + scroll.
+       2. Pointer-driven 3D tilt on every card (.card / .dl-card /
+          .guide-card / .hero-shot).
+     Both are graceful: if WebGL fails or three.js doesn't resolve
+     (offline / blocked CDN), the page works — canvas stays transparent
+     and tilts simply don't fire.
+-->
+<script type="module">
+  const motionOK = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---------- 1. Hero loading sequence ----------
+  // Three lines fade in (CSS-driven); we just toggle .active, then mark
+  // each dot as .done one beat after it appears.
+  (function heroLoad() {
+    const box = document.getElementById('hero-loading');
+    if (!box) return;
+    requestAnimationFrame(() => box.classList.add('active'));
+    const lines = box.querySelectorAll('.hl-line');
+    const delays = [700, 1500, 2200];
+    lines.forEach((line, i) => setTimeout(() => line.classList.add('done'), delays[i]));
+  })();
+
+  // ---------- 1b. GSAP ScrollTrigger journey pin ----------
+  // Pin .journey-stage while the user scrolls through .journey-track
+  // (500vh). Map scroll progress 0→1 to four discrete stages, toggling
+  // active classes + updating the progress bar/percentage. UMD globals
+  // come from <script defer> tags in <head>.
+  function setupJourney() {
+    if (!motionOK) return;
+    if (typeof gsap === 'undefined' || typeof ScrollTrigger === 'undefined') return;
+    gsap.registerPlugin(ScrollTrigger);
+
+    const steps = document.querySelectorAll('.journey-step');
+    const mocks = document.querySelectorAll('.journey-mock');
+    const bar   = document.getElementById('journey-bar');
+    const numEl = document.getElementById('journey-step-num');
+    const pctEl = document.getElementById('journey-pct');
+    const hint  = document.getElementById('journey-hint');
+    const STAGES = 5;
+    if (steps.length === 0) return;
+
+    ScrollTrigger.create({
+      trigger: '#journey-track',
+      start: 'top top',
+      end: '+=500%',           // 5 viewports of scroll inside the pin
+      pin: '.journey-stage',
+      pinSpacing: true,
+      scrub: 0.8,
+      onUpdate: (self) => {
+        const p = self.progress;
+        const idx = Math.min(STAGES - 1, Math.floor(p * STAGES));
+        steps.forEach((el, i) => el.classList.toggle('active', i === idx));
+        mocks.forEach((el, i) => el.classList.toggle('active', i === idx));
+        if (numEl) numEl.textContent = String(idx + 1).padStart(2, '0');
+        const pct = Math.round(p * 100);
+        if (pctEl) pctEl.textContent = pct + '%';
+        if (bar)   bar.style.setProperty('--p', pct + '%');
+        if (hint)  hint.style.opacity = idx === STAGES - 1 ? '0' : '0.6';
+      },
+    });
+  }
+  if (document.readyState === 'complete') setupJourney();
+  else window.addEventListener('load', setupJourney);
+
+  // ---------- 2. Scroll fade-in via IntersectionObserver ----------
+  // IO callbacks fire asynchronously — even for elements already in the
+  // viewport at page load. That left the hero invisible for ~50–200 ms,
+  // long enough to be jarring. So we synchronously check each .reveal's
+  // current rect: if it's visible, add .in immediately; otherwise observe.
+  if (motionOK && 'IntersectionObserver' in window) {
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) {
+          e.target.classList.add('in');
+          io.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.15, rootMargin: '0px 0px -10% 0px' });
+    const vh = window.innerHeight;
+    document.querySelectorAll('.reveal').forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.top < vh && r.bottom > 0) {
+        el.classList.add('in');         // already visible — show now
+      } else {
+        io.observe(el);                 // off-screen — wait for scroll
+      }
+    });
+  } else {
+    // No IO / reduced motion: show everything immediately
+    document.querySelectorAll('.reveal').forEach((el) => el.classList.add('in'));
+  }
+
+  // ---------- 3. Scroll-progress side dots ----------
+  (function scrollProgress() {
+    const nav = document.getElementById('scroll-progress');
+    if (!nav) return;
+    const dots = Array.from(nav.querySelectorAll('a'));
+    const targets = dots.map((d) => document.querySelector(d.getAttribute('href'))).filter(Boolean);
+    if (targets.length === 0) return;
+
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (!e.isIntersecting) return;
+        const idx = targets.indexOf(e.target);
+        if (idx < 0) return;
+        dots.forEach((d, i) => d.classList.toggle('current', i === idx));
+      });
+    }, { rootMargin: '-40% 0px -50% 0px', threshold: 0 });
+    targets.forEach((t) => io.observe(t));
+
+    // Smooth scroll on dot click (native behaviour is fine, just polish).
+    dots.forEach((d) => {
+      d.addEventListener('click', (e) => {
+        const t = document.querySelector(d.getAttribute('href'));
+        if (!t) return;
+        e.preventDefault();
+        t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+  })();
+
+  // ---------- 4. Card tilt (3D hover) ----------
+  function attachTilt(selector, intensity) {
+    document.querySelectorAll(selector).forEach((el) => {
+      el.addEventListener('pointermove', (e) => {
+        const r = el.getBoundingClientRect();
+        const x = ((e.clientX - r.left) / r.width  - 0.5);
+        const y = ((e.clientY - r.top)  / r.height - 0.5);
+        el.style.transform =
+          'perspective(900px) ' +
+          'rotateY(' + (x * intensity)  + 'deg) ' +
+          'rotateX(' + (-y * intensity) + 'deg) ' +
+          'translateZ(6px)';
+      }, { passive: true });
+      el.addEventListener('pointerleave', () => { el.style.transform = ''; });
+    });
+  }
+  if (motionOK) {
+    attachTilt('.card', 8);
+    attachTilt('.dl-card', 10);
+    attachTilt('.guide-card', 5);
+  }
+
+  // ---------- WebGL background scene ----------
+  function hasWebGL() {
+    try {
+      const c = document.createElement('canvas');
+      return !!(c.getContext('webgl2') || c.getContext('webgl'));
+    } catch { return false; }
+  }
+  if (motionOK && hasWebGL()) {
+    try {
+      const THREE = await import('three');
+      const canvas = document.getElementById('three-bg');
+
+      const renderer = new THREE.WebGLRenderer({
+        canvas, alpha: true, antialias: true, powerPreference: 'low-power',
+      });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+      const scene = new THREE.Scene();
+      // Wider fog range so the foreground reads as dense + far stars
+      // still poke through at the edges of perception.
+      scene.fog = new THREE.Fog(0x0b0d11, 35, 110);
+
+      const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 300);
+      camera.position.set(0, 4, 30);
+
+      // ============================================================
+      // 4-layer particle starscape (no more meshes)
+      // ============================================================
+      // The trick to "vast": layered depth + size variance + additive
+      // blending so overlapping particles bloom into nebula-like glow.
+      // All Points materials share one circular alpha texture so the
+      // raw GL_POINT square shape never reads as a "pixel block".
+      function makeStarSprite(size) {
+        const c = document.createElement('canvas');
+        c.width = c.height = size;
+        const ctx = c.getContext('2d');
+        const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        // Centre intensity reduced so single stars don't burn the eye —
+        // overlapping stars still bloom (additive blending), but the
+        // baseline "white-hot" core is dialled back.
+        grad.addColorStop(0.0, 'rgba(255,255,255,0.78)');
+        grad.addColorStop(0.4, 'rgba(255,255,255,0.45)');
+        grad.addColorStop(1.0, 'rgba(255,255,255,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, size, size);
+        const t = new THREE.CanvasTexture(c);
+        t.minFilter = THREE.LinearFilter;
+        t.magFilter = THREE.LinearFilter;
+        return t;
+      }
+      const starSprite = makeStarSprite(64);
+
+      // Helper: build a Points layer with a spherical-shell distribution.
+      // Each point gets a per-vertex colour sampled (weighted) from the
+      // layer's palette — mimics a real night sky where stars come in
+      // blue / white / yellow / orange / red giant / red dwarf flavours.
+      // If `palette` is omitted, all points share `color`.
+      function makeShellLayer({ count, radiusMin, radiusMax, size, color, palette, opacity, additive, fog: useFog }) {
+        const pos = new Float32Array(count * 3);
+        const useVColors = Array.isArray(palette) && palette.length > 0;
+        const col = useVColors ? new Float32Array(count * 3) : null;
+        let palObjs = null, palWeights = null, palTotal = 0;
+        if (useVColors) {
+          palObjs    = palette.map((p) => new THREE.Color(p.hex ?? p));
+          palWeights = palette.map((p) => p.weight ?? 1);
+          palTotal   = palWeights.reduce((a, b) => a + b, 0);
+        }
+        for (let i = 0; i < count; i++) {
+          const theta = Math.random() * Math.PI * 2;
+          const phi   = Math.acos(2 * Math.random() - 1);
+          const r     = radiusMin + Math.random() * (radiusMax - radiusMin);
+          pos[i * 3 + 0] = r * Math.sin(phi) * Math.cos(theta);
+          pos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+          pos[i * 3 + 2] = r * Math.cos(phi);
+          if (useVColors) {
+            let pick = Math.random() * palTotal, idx = 0;
+            for (; idx < palWeights.length - 1; idx++) {
+              pick -= palWeights[idx];
+              if (pick <= 0) break;
+            }
+            const c = palObjs[idx];
+            col[i * 3 + 0] = c.r;
+            col[i * 3 + 1] = c.g;
+            col[i * 3 + 2] = c.b;
+          }
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        if (useVColors) g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+        const m = new THREE.PointsMaterial({
+          size, opacity, transparent: true,
+          sizeAttenuation: true,
+          fog: useFog,
+          depthWrite: false,
+          map: starSprite,
+          alphaTest: 0.01,
+          blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+          ...(useVColors ? { vertexColors: true } : { color }),
+        });
+        return new THREE.Points(g, m);
+      }
+
+      // Star temperature palettes — real stars span blue-white (hot, O/B),
+      // pure white (A/F), pale yellow (G — sun-like), orange (K), all
+      // the way to red giants and red dwarfs. Weights are tuned so the
+      // sky reads as mostly cool whites with occasional warm accents,
+      // not a chaotic "Christmas tree". Closer layers carry a bit more
+      // colour variation because nearby stars in real photos show more
+      // chroma diversity.
+
+      // Far/dust layers — mostly cold whites + faint blues, rare warm
+      const PAL_COLD = [
+        { hex: 0xffffff, weight: 55 },  // pure white
+        { hex: 0xdde6ff, weight: 20 },  // blue-white A-type
+        { hex: 0x9ec0ff, weight: 8  },  // bright blue O/B
+        { hex: 0xffe9c0, weight: 10 },  // pale yellow G
+        { hex: 0xffc890, weight: 5  },  // soft orange K
+        { hex: 0xff9870, weight: 2  },  // red giant tint
+      ];
+      // Closer layers — same idea but more chromatic variation
+      const PAL_RICH = [
+        { hex: 0xffffff, weight: 40 },
+        { hex: 0xdde6ff, weight: 18 },
+        { hex: 0x9ec0ff, weight: 10 },
+        { hex: 0xffe9c0, weight: 16 },
+        { hex: 0xffc890, weight: 10 },
+        { hex: 0xff9870, weight: 4  },
+        { hex: 0xff7060, weight: 2  },
+      ];
+
+      // Lower opacity + slightly smaller points across the board so the
+      // sky reads as quiet and deep rather than a glittering blanket.
+      // Layer densities kept (still ~19000 particles) so the field is
+      // dense — just visually softer.
+
+      // L0 · ultra-far dust — barely-visible specks at infinity
+      const dustStars = makeShellLayer({
+        count: 9000, radiusMin: 140, radiusMax: 220,
+        size: 0.035, palette: PAL_COLD, opacity: 0.40,
+        additive: true, fog: false,
+      });
+      scene.add(dustStars);
+
+      // L1 · distant star field
+      const farStars = makeShellLayer({
+        count: 5500, radiusMin: 80, radiusMax: 140,
+        size: 0.06, palette: PAL_COLD, opacity: 0.55,
+        additive: true, fog: false,
+      });
+      scene.add(farStars);
+
+      // L2 · mid-distance stars
+      const midStars = makeShellLayer({
+        count: 3200, radiusMin: 40, radiusMax: 75,
+        size: 0.085, palette: PAL_RICH, opacity: 0.50,
+        additive: true, fog: true,
+      });
+      scene.add(midStars);
+
+      // L3 · close stars — biggest chromatic variance, but still subdued
+      const nearStars = makeShellLayer({
+        count: 1300, radiusMin: 18, radiusMax: 38,
+        size: 0.12, palette: PAL_RICH, opacity: 0.55,
+        additive: true, fog: true,
+      });
+      scene.add(nearStars);
+
+      // L4 · No central galaxy — the four star-field layers above
+      // already deliver the "vast cosmos" feeling. Adding any focal
+      // galaxy (procedural OR photo) kept introducing centre-of-spin
+      // problems and constructing focus where there shouldn't be any.
+      // Keep the sky pure.
+      const galaxyGroup = null;
+
+      // The function below is intentionally retained but unused, in case
+      // we want to fall back to procedural rendering on hosts that block
+      // the texture download. Tree-shaking nukes it.
+      function makeGalaxyProceduralUnused() {
+        const group = new THREE.Group();
+        // Sub-groups so we can rotate the disc independently of the
+        // bulge. Real galaxies LOOK like only the disc spins (the bulge
+        // is rotationally symmetric so its rotation isn't visible);
+        // rotating the whole assembly together makes the nucleus drift
+        // unnaturally. group.spinningDisc is exposed so the animation
+        // loop can rotate only the arm + Hα population.
+        const stableCenter = new THREE.Group();
+        const spinningDisc = new THREE.Group();
+        group.add(stableCenter);
+        group.add(spinningDisc);
+        group.spinningDisc = spinningDisc;
+
+        // --- Box-Muller for true gaussian distribution ---
+        const gauss = () => {
+          let u = 0, v = 0;
+          while (u === 0) u = Math.random();
+          while (v === 0) v = Math.random();
+          return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+        };
+
+        // --- (a) Three-layer bulge — sharp nucleus + tight core + wide halo
+        // The key insight: real galactic centers have a brightness profile
+        // that drops off ~exponentially with radius, so we stack three
+        // populations with different σ and opacity. Where they overlap
+        // (the very center) additive blending makes the nucleus pop;
+        // where only the outer layer reaches, you get smooth haze.
+
+        // L-a1: NUCLEUS — cool blue-white (high-temperature young stars)
+        const NUCLEUS_COUNT = 300;
+        const nucleusPos = new Float32Array(NUCLEUS_COUNT * 3);
+        for (let i = 0; i < NUCLEUS_COUNT; i++) {
+          nucleusPos[i * 3 + 0] = gauss() * 0.40;
+          nucleusPos[i * 3 + 1] = gauss() * 0.18;
+          nucleusPos[i * 3 + 2] = gauss() * 0.40;
+        }
+        const nucleusGeom = new THREE.BufferGeometry();
+        nucleusGeom.setAttribute('position', new THREE.BufferAttribute(nucleusPos, 3));
+        const nucleus = new THREE.Points(
+          nucleusGeom,
+          new THREE.PointsMaterial({
+            color: 0xeaf2ff,            // cool blue-white
+            size: 0.20,
+            transparent: true,
+            opacity: 1.0,
+            sizeAttenuation: true,
+            fog: false,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        );
+        stableCenter.add(nucleus);
+
+        // L-a2: RAYS — 8 radial spikes (the "supernova / lens flare" effect)
+        // Each ray is a string of particles fading outward. Hot blue near
+        // center, magenta-pink at the tip — same physics as real galactic
+        // synchrotron jets.
+        const RAYS = 8;
+        const PER_RAY = 40;
+        const RAY_TOTAL = RAYS * PER_RAY;
+        const rayLen = 7.5;
+        const rayPos = new Float32Array(RAY_TOTAL * 3);
+        const rayCol = new Float32Array(RAY_TOTAL * 3);
+        const cHot  = new THREE.Color(0xc8d8ff);
+        const cCool = new THREE.Color(0xff80b0);
+        const tmpRay = new THREE.Color();
+        for (let i = 0; i < RAYS; i++) {
+          const ang = (i / RAYS) * Math.PI * 2 + Math.random() * 0.25;
+          for (let j = 0; j < PER_RAY; j++) {
+            const t = (j + 0.5) / PER_RAY;             // 0..1
+            const r = t * rayLen;
+            const jitter = t * 0.18;                    // splay outward
+            const idx = (i * PER_RAY + j) * 3;
+            rayPos[idx + 0] = Math.cos(ang) * r + gauss() * jitter;
+            rayPos[idx + 1] = gauss() * jitter * 0.4;   // stay near disc plane
+            rayPos[idx + 2] = Math.sin(ang) * r + gauss() * jitter;
+            const fade = (1 - t) * (1 - t);             // quadratic fade out
+            tmpRay.copy(cHot).lerp(cCool, t);
+            rayCol[idx + 0] = tmpRay.r * fade;
+            rayCol[idx + 1] = tmpRay.g * fade;
+            rayCol[idx + 2] = tmpRay.b * fade;
+          }
+        }
+        const rayGeom = new THREE.BufferGeometry();
+        rayGeom.setAttribute('position', new THREE.BufferAttribute(rayPos, 3));
+        rayGeom.setAttribute('color',    new THREE.BufferAttribute(rayCol, 3));
+        const rays = new THREE.Points(
+          rayGeom,
+          new THREE.PointsMaterial({
+            size: 0.16,
+            transparent: true,
+            opacity: 0.85,
+            vertexColors: true,
+            sizeAttenuation: true,
+            fog: false,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        );
+        stableCenter.add(rays);
+
+        // L-a3: CORE — pale blue, tight halo around nucleus
+        const CORE_COUNT = 700;
+        const corePos = new Float32Array(CORE_COUNT * 3);
+        for (let i = 0; i < CORE_COUNT; i++) {
+          corePos[i * 3 + 0] = gauss() * 1.0;
+          corePos[i * 3 + 1] = gauss() * 0.35;
+          corePos[i * 3 + 2] = gauss() * 1.0;
+        }
+        const coreGeom = new THREE.BufferGeometry();
+        coreGeom.setAttribute('position', new THREE.BufferAttribute(corePos, 3));
+        const core = new THREE.Points(
+          coreGeom,
+          new THREE.PointsMaterial({
+            color: 0xb8c8ff,            // pale blue
+            size: 0.11,
+            transparent: true,
+            opacity: 0.55,
+            sizeAttenuation: true,
+            fog: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        );
+        stableCenter.add(core);
+
+        // L-a4: HALO — wide, warm pink (Hα emission from older stellar pop)
+        const HALO_COUNT = 1300;
+        const haloPos = new Float32Array(HALO_COUNT * 3);
+        for (let i = 0; i < HALO_COUNT; i++) {
+          haloPos[i * 3 + 0] = gauss() * 3.4;
+          haloPos[i * 3 + 1] = gauss() * 1.1;
+          haloPos[i * 3 + 2] = gauss() * 3.4;
+        }
+        const haloGeom = new THREE.BufferGeometry();
+        haloGeom.setAttribute('position', new THREE.BufferAttribute(haloPos, 3));
+        const halo = new THREE.Points(
+          haloGeom,
+          new THREE.PointsMaterial({
+            color: 0xff9ab0,            // hot pink Hα
+            size: 0.08,
+            transparent: true,
+            opacity: 0.30,
+            sizeAttenuation: true,
+            fog: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        );
+        stableCenter.add(halo);
+
+        // --- procedural nebula texture (canvas, generated once) ---
+        // Soft radial falloff × layered fractal noise = wispy cloud
+        // alpha mask. Two tints (pink for Hα emission, blue for OIII /
+        // reflection) cover most real-world nebula colours.
+        function makeNebulaTexture(size) {
+          const c = document.createElement('canvas');
+          c.width = c.height = size;
+          const ctx = c.getContext('2d');
+          const img = ctx.createImageData(size, size);
+          for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+              const idx = (y * size + x) * 4;
+              const dx = (x - size / 2) / (size / 2);
+              const dy = (y - size / 2) / (size / 2);
+              const r = Math.sqrt(dx * dx + dy * dy);
+              let falloff = Math.max(0, 1 - r);
+              falloff = falloff * falloff * (3 - 2 * falloff); // smoothstep
+              // 5-octave value-noise stand-in using fast sin/cos lattice
+              let n = 0;
+              for (let oct = 0; oct < 5; oct++) {
+                const f = Math.pow(2, oct);
+                n += Math.abs(Math.sin(x * 0.031 * f + y * 0.027 * f + oct * 1.3)) / f;
+              }
+              n = (n / 1.94) * 0.7 + 0.3;        // 0.3..1
+              const a = falloff * n;
+              img.data[idx + 0] = 255;
+              img.data[idx + 1] = 255;
+              img.data[idx + 2] = 255;
+              img.data[idx + 3] = Math.min(255, a * 255);
+            }
+          }
+          ctx.putImageData(img, 0, 0);
+          const tex = new THREE.CanvasTexture(c);
+          tex.minFilter = THREE.LinearFilter;
+          tex.magFilter = THREE.LinearFilter;
+          tex.needsUpdate = true;
+          return tex;
+        }
+        const nebulaTex = makeNebulaTexture(256);
+
+        // --- (b) Disc: 4 spiral arms, NO central pile-up ---
+        const DISC_COUNT = 1800;
+        const ARMS  = 4;
+        const R_MIN = 3.0;
+        const R_MAX = 26;
+        const SPIN  = 0.42;
+        // Hot-pink / cool-blue palette like real spiral galaxies (M81, M51):
+        // pink at the "shoulders" where H-α emission lights up clouds of
+        // new star formation, deeper blue farther out where older stars
+        // dominate the visible spectrum.
+        const cInner = new THREE.Color(0xff90b0);   // hot pink
+        const cMid   = new THREE.Color(0xa8c8ff);   // pale blue
+        const cOut   = new THREE.Color(0x5878d8);   // deep blue rim
+        const discPos = new Float32Array(DISC_COUNT * 3);
+        const discCol = new Float32Array(DISC_COUNT * 3);
+        const tmp = new THREE.Color();
+        for (let i = 0; i < DISC_COUNT; i++) {
+          const f = Math.pow(Math.random(), 1.1);
+          const r = R_MIN + f * (R_MAX - R_MIN);
+          const arm = (i % ARMS) * (Math.PI * 2 / ARMS);
+          const angle = arm + r * SPIN;
+          const armSpread = 0.8 + r * 0.10;
+          const sx = gauss() * armSpread;
+          const sy = gauss() * 0.35;
+          const sz = gauss() * armSpread;
+          discPos[i * 3 + 0] = Math.cos(angle) * r + sx;
+          discPos[i * 3 + 1] = sy;
+          discPos[i * 3 + 2] = Math.sin(angle) * r + sz;
+          // Pink at f≈0..0.3, blue mid at 0.3..0.7, deep blue 0.7..1
+          if (f < 0.35) tmp.copy(cInner).lerp(cMid, f / 0.35);
+          else          tmp.copy(cMid).lerp(cOut, (f - 0.35) / 0.65);
+          discCol[i * 3 + 0] = tmp.r;
+          discCol[i * 3 + 1] = tmp.g;
+          discCol[i * 3 + 2] = tmp.b;
+        }
+        const discGeom = new THREE.BufferGeometry();
+        discGeom.setAttribute('position', new THREE.BufferAttribute(discPos, 3));
+        discGeom.setAttribute('color',    new THREE.BufferAttribute(discCol, 3));
+        const disc = new THREE.Points(
+          discGeom,
+          new THREE.PointsMaterial({
+            // Demoted to a faint star-field carpet — the nebula sprites
+            // below carry the main visual weight now.
+            size: 0.085,
+            transparent: true,
+            opacity: 0.32,
+            vertexColors: true,
+            sizeAttenuation: true,
+            fog: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        );
+        spinningDisc.add(disc);
+
+        // --- (c) Nebula clusters — wispy sprite clouds doing the heavy
+        //         visual lifting. Two colour passes (pink Hα + cool blue
+        //         reflection / OIII), with a sparse dark-brown pass to
+        //         hint at dust lanes. Sprites are billboarded so they
+        //         always face the camera. ~40 sprites total = 40 draw
+        //         calls, fine on modern GPUs.
+        function addNebulaCloud(count, tint, opaRange, sizeRange) {
+          for (let i = 0; i < count; i++) {
+            const f = Math.random();
+            const r = R_MIN + f * (R_MAX - R_MIN);
+            const arm = (i % ARMS) * (Math.PI * 2 / ARMS);
+            const angle = arm + r * SPIN + (Math.random() - 0.5) * 0.8;
+            const armSp = 1.2 + r * 0.18;
+            const sx = gauss() * armSp;
+            const sy = gauss() * 0.55;
+            const sz = gauss() * armSp;
+            const sprite = new THREE.Sprite(
+              new THREE.SpriteMaterial({
+                map: nebulaTex,
+                color: tint,
+                transparent: true,
+                opacity: opaRange[0] + Math.random() * (opaRange[1] - opaRange[0]),
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                fog: true,
+              }),
+            );
+            sprite.position.set(
+              Math.cos(angle) * r + sx,
+              sy,
+              Math.sin(angle) * r + sz,
+            );
+            const s = sizeRange[0] + Math.random() * (sizeRange[1] - sizeRange[0]);
+            sprite.scale.set(s, s, 1);
+            // Random rotation so identical texture doesn't tile visibly
+            sprite.material.rotation = Math.random() * Math.PI * 2;
+            spinningDisc.add(sprite);
+          }
+        }
+        addNebulaCloud(20, 0xff6090, [0.35, 0.65], [3.5, 6.5]);   // Hα pink
+        addNebulaCloud(14, 0x6a90ff, [0.30, 0.55], [4.0, 7.0]);   // reflection blue
+        addNebulaCloud(8,  0xc0d8a0, [0.25, 0.45], [3.0, 5.5]);   // OIII teal-green
+        addNebulaCloud(6,  0xff9060, [0.30, 0.55], [3.0, 5.0]);   // warm tip
+        // (No dust lane — additive blending can only add light, not
+        //  subtract; to do dark bands we'd need to render normal-blended
+        //  black sprites and that produces ugly hard discs against the
+        //  bright nebulae. Skipped for now.)
+
+        return group;
+      }
+      // (procedural galaxy unused — galaxySprite above replaces it)
+
+      // No more accent meshes — clean it up.
+      const shapes = [];
+
+      let mouseX = 0, mouseY = 0;
+      // scrollT goes 0 → N (one unit per viewport scrolled). The whole page
+      // is roughly 5 viewports, so scrollT ends near 5.
+      let scrollT = 0;
+      window.addEventListener('pointermove', (e) => {
+        mouseX = (e.clientX / window.innerWidth  - 0.5);
+        mouseY = (e.clientY / window.innerHeight - 0.5);
+      }, { passive: true });
+      window.addEventListener('scroll', () => {
+        scrollT = window.scrollY / window.innerHeight;
+      }, { passive: true });
+
+      function resize() {
+        const w = window.innerWidth, h = window.innerHeight;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+      resize();
+      window.addEventListener('resize', resize);
+
+      let hidden = false;
+      document.addEventListener('visibilitychange', () => {
+        hidden = document.hidden;
+        if (!hidden) requestAnimationFrame(loop);
+      });
+
+      // Per-section "moods" — fog colour the scene drifts toward as you
+      // scroll past each viewport. Roughly aligned to the page sections:
+      //   0 hero        : deep navy
+      //   1 features    : brand blue
+      //   2 download    : muted purple
+      //   3 quickstart  : teal
+      //   4 guide       : warm amber tilt
+      //   5 signup      : deep navy again
+      const moods = [
+        new THREE.Color(0x0b0d11),  // hero — original bg-1
+        new THREE.Color(0x0f1a3a),  // features — blue tint
+        new THREE.Color(0x1b1430),  // download — purple
+        new THREE.Color(0x0e2a2a),  // quickstart — teal
+        new THREE.Color(0x2a1d10),  // guide — amber
+        new THREE.Color(0x0b0d11),  // signup — return home
+      ];
+      const fogColor = new THREE.Color();
+
+      // Smoothed camera target — eased toward the desired path so motion
+      // feels weighted, not jittery.
+      const camTarget = new THREE.Vector3(0, 4, 30);
+      const camPos    = new THREE.Vector3(0, 4, 30);
+
+      function loop(t) {
+        if (hidden) return;
+
+        // Star fields drift VERY slowly around the Y axis only. The
+        // earlier sin/cos wobble on X looked nice in motion but made
+        // points cross sub-pixel boundaries each frame, which the eye
+        // reads as "twinkling" and gets tiring. Pure Y rotation is so
+        // gradual that points stay on the same pixel for many frames.
+        dustStars.rotation.y = -t * 0.000003;
+        farStars.rotation.y  = -t * 0.000005;
+        midStars.rotation.y  = -t * 0.000010;
+        nearStars.rotation.y = -t * 0.000018;
+        // (No more .rotation.x wobble — that was the main source of
+        //  twinkle. The camera's mouse parallax still gives life.)
+        // (No central galaxy — pure star-field sky.)
+
+        // Cross-fade fog between adjacent moods based on scroll position.
+        const f = Math.max(0, Math.min(moods.length - 1.001, scrollT));
+        const i = Math.floor(f);
+        const tt = f - i;
+        fogColor.copy(moods[i]).lerp(moods[i + 1], tt);
+        scene.fog.color.copy(fogColor);
+
+        // Camera path — a long sweeping arc that arcs over the galaxy
+        // as the user scrolls. xz orbit + slow drift toward it.
+        const sweep = scrollT * 0.5;
+        camTarget.x = Math.sin(sweep) * 8 + mouseX * 6;
+        camTarget.y = 4 + Math.cos(sweep * 0.7) * 2 + (-mouseY * 4);
+        camTarget.z = 30 - Math.min(scrollT * 3, 22);   // approach but never hit
+        camPos.lerp(camTarget, 0.04);
+        camera.position.copy(camPos);
+        // Look toward the galaxy core rather than world origin — gives the
+        // shot a clear focal point that pulls you in.
+        camera.lookAt(0, -2, -25);
+
+        renderer.render(scene, camera);
+        requestAnimationFrame(loop);
+      }
+
+      document.body.classList.add('has-3d');
+      requestAnimationFrame(loop);
+    } catch (err) {
+      // CDN blocked, three.js parse error, etc. Page still functional.
+      console.warn('[3d] disabled:', err);
+    }
+  }
+</script>
+
+</body>
+</html>

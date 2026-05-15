@@ -1,0 +1,97 @@
+name: Release Desktop Builds
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:  # manual run from Actions tab
+
+permissions:
+  contents: write    # needed to create GitHub Release
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            script: dist:mac
+            artifacts: client/release/*.dmg
+          - os: windows-latest
+            script: dist:win
+            artifacts: client/release/*.exe
+          - os: ubuntu-latest
+            script: dist:linux
+            artifacts: client/release/*.AppImage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+        working-directory: client
+
+      - name: Build
+        run: npm run ${{ matrix.script }}
+        working-directory: client
+        env:
+          # Disable electron-builder's auto-discovery of Apple identities;
+          # we ad-hoc sign via afterPack.cjs (no Developer ID yet).
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          # Skip notarization (no Apple Developer ID yet).
+          # When you have one, set APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID secrets.
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifacts }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # === Optional: Sign Windows .exe via SignPath.io (free for OSS) ===
+  # Uncomment after you've onboarded the project at https://signpath.io
+  # and configured these GitHub Secrets:
+  #   SIGNPATH_API_TOKEN
+  #   SIGNPATH_ORGANIZATION_ID
+  #   SIGNPATH_PROJECT_SLUG
+  #   SIGNPATH_SIGNING_POLICY_SLUG
+  #
+  # sign-windows:
+  #   needs: build
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Download unsigned .exe from release
+  #       run: |
+  #         gh release download ${{ github.ref_name }} \
+  #           --pattern '*.exe' --dir ./signing/ \
+  #           --repo ${{ github.repository }}
+  #       env:
+  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #     - name: Submit to SignPath
+  #       uses: signpath/github-action-submit-signing-request@v1
+  #       with:
+  #         api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+  #         organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+  #         project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+  #         signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+  #         artifact-configuration-slug: 'dfchat-exe'
+  #         github-artifact-id: <set after first run>
+  #         wait-for-completion: true
+  #         output-artifact-directory: ./signed/
+  #     - name: Re-upload signed .exe
+  #       run: |
+  #         gh release upload ${{ github.ref_name }} ./signed/*.exe --clobber \
+  #           --repo ${{ github.repository }}
+  #       env:
+  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
