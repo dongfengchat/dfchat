@@ -40,8 +40,16 @@ function targetEquals(a: ChatTarget | null, b: ChatTarget): boolean {
   return false;
 }
 
-function UnreadBadge({ count }: { count: number }) {
-  if (count <= 0) return null;
+function UnreadBadge({ count, mention }: { count: number; mention?: boolean }) {
+  if (count <= 0 && !mention) return null;
+  // @-mention: amber + "@" prefix (looks distinct even when count is 0).
+  if (mention) {
+    return (
+      <span className="ml-auto shrink-0 min-w-[1.25rem] h-5 px-1.5 rounded-full bg-accent-amber text-white text-[11px] font-bold flex items-center justify-center" title="有人 @ 了你">
+        @{count > 0 && count <= 99 ? count : count > 99 ? '99+' : ''}
+      </span>
+    );
+  }
   return (
     <span className="ml-auto shrink-0 min-w-[1.25rem] h-5 px-1.5 rounded-full bg-accent-red text-white text-[11px] font-medium flex items-center justify-center">
       {count > 99 ? '99+' : count}
@@ -73,6 +81,7 @@ export default function FriendSidebar({
   const setChannels = useChatStore((s) => s.setChannels);
   const activeTarget = useChatStore((s) => s.activeTarget);
   const setActiveTarget = useChatStore((s) => s.setActiveTarget);
+  const mentionByConv = useChatStore((s) => s.mentionByConv);
   const lastSeq = useSeqStore((s) => s.last);
   const readSeq = useSeqStore((s) => s.read);
 
@@ -236,7 +245,9 @@ export default function FriendSidebar({
           )}
           {filteredFriends.map((f) => {
             const t: ChatTarget = { kind: 'friend', id: f.id };
-            const u = user ? unread(privateConvId(user.id, f.id)) : 0;
+            const convId = user ? privateConvId(user.id, f.id) : '';
+            const u = user ? unread(convId) : 0;
+            const mentioned = !!mentionByConv[convId];
             const active = targetEquals(activeTarget, t);
             return (
               <button
@@ -256,7 +267,7 @@ export default function FriendSidebar({
                     {f.isOnline ? <span className="text-accent-green">在线</span> : `@${f.username}`}
                   </div>
                 </div>
-                <UnreadBadge count={u} />
+                <UnreadBadge count={u} mention={mentioned} />
               </button>
             );
           })}

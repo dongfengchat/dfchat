@@ -30,6 +30,10 @@ interface ChatState {
   // when MembersPanel opens. Key = groupId. Used by Home WS listener to
   // decide whether to pop a toast / desktop notification for a new message.
   groupNotifyModes: Record<string, 0 | 1 | 2>;
+  // True if recent unread messages in this conv @-mention the current user.
+  // Numeric unread count comes from lastSeq - readSeq (seqStore); this flag
+  // adds the "mention highlight" coloring that seq alone can't infer.
+  mentionByConv: Record<string, boolean>;
   pendingJump: PendingJump | null;
 
   setFriends: (friends: Friend[]) => void;
@@ -48,6 +52,8 @@ interface ChatState {
   setMuted: (convId: string, muted: boolean) => void;
   setMutedAll: (ids: string[]) => void;
   setGroupNotifyMode: (groupId: string, mode: 0 | 1 | 2) => void;
+  bumpUnread: (convId: string, mention: boolean) => void;
+  clearUnread: (convId: string) => void;
   setPendingJump: (j: PendingJump | null) => void;
   hydrateFromCache: () => void;
 }
@@ -85,6 +91,7 @@ export const useChatStore = create<ChatState>((set) => ({
   peerLastReadSeq: {},
   mutedConvs: new Set<string>(),
   groupNotifyModes: {},
+  mentionByConv: {},
   pendingJump: null,
 
   setFriends: (friends) => set({ friends }),
@@ -92,6 +99,8 @@ export const useChatStore = create<ChatState>((set) => ({
   setChannels: (groupId, channels) =>
     set((s) => ({ channelsByGroup: { ...s.channelsByGroup, [groupId]: channels } })),
   setActiveTarget: (t) => set({ activeTarget: t }),
+  // Note: clearing unread on conv-switch is done in ChatView (it already
+  // computes ctx.convId — keeps this store free of cross-store coupling).
 
   setMessages: (convId, msgs) => {
     const ordered = [...msgs].reverse();
@@ -183,6 +192,19 @@ export const useChatStore = create<ChatState>((set) => ({
 
   setGroupNotifyMode: (groupId: string, mode: 0 | 1 | 2) =>
     set((s) => ({ groupNotifyModes: { ...s.groupNotifyModes, [groupId]: mode } })),
+
+  bumpUnread: (convId, mention) =>
+    set((s) => mention
+      ? { mentionByConv: { ...s.mentionByConv, [convId]: true } }
+      : s),
+
+  clearUnread: (convId) =>
+    set((s) => {
+      if (!(convId in s.mentionByConv)) return s;
+      const m = { ...s.mentionByConv };
+      delete m[convId];
+      return { mentionByConv: m };
+    }),
 
   setPeerRead: (convId, userId, seq) =>
     set((s) => {

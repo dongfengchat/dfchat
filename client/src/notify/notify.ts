@@ -1,15 +1,18 @@
 import type { ChatMessage } from '@/types';
+import { toast } from '@/components/ui/Toast';
+import { isSoundEnabled, playMentionChime, playNotifyChime } from './sound';
 
-// Lightweight async getter to avoid notifying when the window is focused
-// and the user is already looking at the conversation.
-async function shouldNotify(convId: string, activeConvId: string | null): Promise<boolean> {
+async function isFocusedOnConv(convId: string, activeConvId: string | null): Promise<boolean> {
   if (!window.electronAPI) {
-    // Browser/fallback path — only notify when document is hidden.
-    return document.visibilityState !== 'visible' || activeConvId !== convId;
+    return document.visibilityState === 'visible' && activeConvId === convId;
   }
   const focused = await window.electronAPI.isWindowFocused();
-  if (focused && activeConvId === convId) return false;
-  return true;
+  return focused && activeConvId === convId;
+}
+
+async function isAppFocused(): Promise<boolean> {
+  if (!window.electronAPI) return document.visibilityState === 'visible';
+  return window.electronAPI.isWindowFocused();
 }
 
 function previewText(msg: ChatMessage): string {
@@ -22,17 +25,51 @@ function previewText(msg: ChatMessage): string {
   return '[消息]';
 }
 
-export async function maybeNotify(
-  msg: ChatMessage,
-  meta: { senderName: string; conversationTitle: string; activeConvId: string | null },
-): Promise<void> {
-  if (!(await shouldNotify(msg.conversationId, meta.activeConvId))) return;
+// Debounce: same conv getting multiple messages in 5 s window collapses
+// into a single banner so we don't carpet-bomb the user with toasts.
+const pendingAt: Map<string, number> = new Map();
+const DEBOUNCE_MS = 5000;
 
-  const title = msg.conversationId.startsWith('g_')
+interface NotifyMeta {
+  senderName: string;
+  conversationTitle: string;
+  activeConvId: string | null;
+  isMention: boolean;
+}
+
+export async function maybeNotify(msg: ChatMessage, meta: NotifyMeta): Promise<void> {
+  // 1) If the user is already looking at this conv with the window
+  // focused, do nothing — they see it in the conversation already.
+  if (await isFocusedOnConv(msg.conversationId, meta.activeConvId)) return;
+
+  // 2) Audible chime — mentions get a brighter two-note chime.
+  if (isSoundEnabled()) {
+    if (meta.isMention) playMentionChime();
+    else playNotifyChime();
+  }
+
+  const isGroupConv = msg.conversationId.startsWith('g_') || msg.conversationId.startsWith('c_');
+  const title = isGroupConv
     ? `${meta.conversationTitle} · ${meta.senderName}`
-    : meta.senderName || meta.conversationTitle;
+    : (meta.senderName || meta.conversationTitle);
   const body = previewText(msg);
 
+  // 3) Channel: app-focused → in-app toast; app-bg → OS desktop notification.
+  const focused = await isAppFocused();
+  if (focused) {
+    // Debounce burst messages from the same conv.
+    const lastAt = pendingAt.get(msg.conversationId) ?? 0;
+    if (Date.now() - lastAt < DEBOUNCE_MS) return;
+    pendingAt.set(msg.conversationId, Date.now());
+
+    toast(
+      meta.isMention ? `🔔 ${title} 提到了你: ${body}` : `${title}: ${body}`,
+      'info',
+    );
+    return;
+  }
+
+  // 4) App in background — OS-level desktop notification.
   if (window.electronAPI) {
     await window.electronAPI.showNotification({
       title,
@@ -41,7 +78,6 @@ export async function maybeNotify(
     });
     return;
   }
-
   // Browser fallback.
   if ('Notification' in window) {
     if (Notification.permission === 'default') {
@@ -58,7 +94,6 @@ export async function setBadge(count: number): Promise<void> {
     await window.electronAPI.setBadge(count);
   } else if ('setAppBadge' in navigator) {
     try {
-      // Chrome/Edge PWA API
       if (count > 0) await (navigator as any).setAppBadge(count);
       else await (navigator as any).clearAppBadge();
     } catch {

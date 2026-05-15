@@ -356,6 +356,8 @@ export default function ChatView() {
 
   useEffect(() => {
     if (!ctx) return;
+    // Entering a conv clears its sidebar unread badge.
+    useChatStore.getState().clearUnread(ctx.convId);
     let cancelled = false;
     setLoadingHistory(true);
     setReplyingTo(null);

@@ -97,13 +97,14 @@ export default function Home() {
         const meId = useUserStore.getState().user?.id;
         if (msg.senderId === meId) return;
         // Honor "do not disturb" — muted conversation skips banner/sound.
-        if (useChatStore.getState().mutedConvs.has(msg.conversationId)) return;
+        const convMuted = useChatStore.getState().mutedConvs.has(msg.conversationId);
 
         const { friends, groups, channelsByGroup, activeTarget, groupNotifyModes } = useChatStore.getState();
 
-        // Group notify mode (0=all, 1=mention-only, 2=muted). Look up the
-        // owning group for channel messages too. mode 2 → skip outright;
-        // mode 1 → only notify if message mentions me.
+        // Decide whether to fire toast/sound/desktop notification. Even if
+        // we skip the notification, we still want the sidebar unread badge
+        // to update so the user can see "X conversations have new content".
+        let notifyAllowed = !convMuted;
         let owningGroupId: string | null = null;
         if (msg.conversationId.startsWith('g_')) {
           owningGroupId = msg.conversationId.slice(2);
@@ -113,12 +114,12 @@ export default function Home() {
             if (chs.some((c) => c.id === channelId)) { owningGroupId = gid; break; }
           }
         }
-        if (owningGroupId && meId) {
+        if (notifyAllowed && owningGroupId && meId) {
           const mode = groupNotifyModes[owningGroupId] ?? 0;
-          if (mode === 2) return; // muted — no toast / desktop / sound
+          if (mode === 2) notifyAllowed = false;
           if (mode === 1) {
             const mentioned = (msg.mentions ?? []).map(String).includes(String(meId));
-            if (!mentioned) return;
+            if (!mentioned) notifyAllowed = false;
           }
         }
         let senderName = `用户 ${msg.senderId}`;
@@ -151,7 +152,18 @@ export default function Home() {
           : activeTarget.kind === 'channel'
           ? channelConvId(activeTarget.channelId)
           : null;
-        void maybeNotify(msg, { senderName, conversationTitle, activeConvId });
+
+        // @-mention check: server stores mentions as numeric user IDs.
+        const isMention = !!meId && (msg.mentions ?? []).map(String).includes(String(meId));
+
+        // Bump unread counter unless this conv is currently focused.
+        if (activeConvId !== msg.conversationId) {
+          useChatStore.getState().bumpUnread(msg.conversationId, isMention);
+        }
+
+        if (notifyAllowed) {
+          void maybeNotify(msg, { senderName, conversationTitle, activeConvId, isMention });
+        }
         return;
       }
       if (ev.type === 'chat.recall') {
