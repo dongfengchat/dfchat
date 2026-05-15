@@ -673,6 +673,27 @@ export async function adminListUsers(opts?: { search?: string; limit?: number; o
   }
 }
 
+// === Email verification + password reset (public) ===
+export async function forgotPassword(email: string): Promise<{ ok: boolean; devLink?: string }> {
+  try {
+    const res = await api.post<{ ok: boolean; devLink?: string }>('/api/v1/auth/forgot-password', { email });
+    return res.data;
+  } catch (e) { throw unwrapError(e); }
+}
+
+export async function resetPassword(token: string, newPassword: string): Promise<void> {
+  try {
+    await api.post('/api/v1/auth/reset-password', { token, newPassword });
+  } catch (e) { throw unwrapError(e); }
+}
+
+export async function sendVerificationEmail(): Promise<{ ok: boolean; alreadyVerified?: boolean; devLink?: string }> {
+  try {
+    const res = await api.post<{ ok: boolean; alreadyVerified?: boolean; devLink?: string }>('/api/v1/auth/send-verification');
+    return res.data;
+  } catch (e) { throw unwrapError(e); }
+}
+
 export async function adminSetUserStatus(userId: string, status: number): Promise<void> {
   try {
     await api.patch(`/api/v1/admin/users/${userId}/status`, { status });

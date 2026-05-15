@@ -326,6 +326,7 @@ export default function Home() {
   return (
     <div className="h-screen flex flex-col bg-bg-1 text-ink-1">
       <TitleBar title="东风快信" />
+      {!user.emailVerified && <EmailVerifyBanner />}
       <div className="flex flex-1 min-h-0">
         <FriendSidebar
           onLogout={handleLogout}
@@ -338,6 +339,62 @@ export default function Home() {
         <CallOverlay />
       </div>
       <SearchModal open={searchOpen} onClose={() => setSearchOpen(false)} />
+    </div>
+  );
+}
+
+function EmailVerifyBanner() {
+  const [dismissed, setDismissed] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sentAt, setSentAt] = useState<number | null>(null);
+
+  if (dismissed) return null;
+
+  async function resend() {
+    setSending(true);
+    try {
+      const { sendVerificationEmail } = await import('@/api/client');
+      const res = await sendVerificationEmail();
+      if (res.alreadyVerified) {
+        toast('邮箱已验证 — 刷新页面查看', 'info');
+        setDismissed(true);
+        return;
+      }
+      setSentAt(Date.now());
+      if (res.devLink) {
+        toast('开发模式：验证链接已 log，控制台可见', 'info');
+      } else {
+        toast('验证邮件已发送，去邮箱查收', 'success');
+      }
+    } catch (e: any) {
+      toast(e.message ?? '发送失败', 'error');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  const cooled = !sentAt || Date.now() - sentAt > 60000;
+
+  return (
+    <div className="bg-accent-amber/15 border-b border-accent-amber/40 px-4 py-2 text-sm flex items-center gap-3">
+      <span className="text-accent-amber">⚠️</span>
+      <span className="text-ink-2 flex-1">
+        你的邮箱还未验证。验证后才能在忘记密码时收到重置邮件。
+      </span>
+      <button
+        onClick={resend}
+        disabled={sending || !cooled}
+        className="btn-secondary text-xs py-1"
+      >
+        {sending ? '发送中…' : (sentAt ? (cooled ? '重新发送' : '已发送') : '发送验证邮件')}
+      </button>
+      <button
+        onClick={() => setDismissed(true)}
+        className="btn-icon w-6 h-6 text-ink-3"
+        title="本次会话隐藏"
+      >
+        ×
+      </button>
     </div>
   );
 }

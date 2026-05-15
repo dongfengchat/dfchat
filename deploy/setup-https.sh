@@ -33,7 +33,7 @@ FILES_DOMAIN="${FILES_DOMAIN:-files.${BASE_DOMAIN}}"
 HOST="${DFCHAT_HOST:-198.44.238.9}"
 PORT="${DFCHAT_PORT:-13493}"
 USER="${DFCHAT_USER:-root}"
-PASSWORD="${DFCHAT_PASSWORD:?Set DFCHAT_PASSWORD env var (your server's SSH password)}"
+PASSWORD="${DFCHAT_PASSWORD:?Set DFCHAT_PASSWORD env var (your server SSH password)}"
 REMOTE_DIR="${DFCHAT_REMOTE_DIR:-/opt/dfchat}"
 
 SSH="sshpass -p ${PASSWORD} ssh -p ${PORT} -o StrictHostKeyChecking=accept-new ${USER}@${HOST}"

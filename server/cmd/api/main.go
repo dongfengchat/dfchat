@@ -28,6 +28,7 @@ import (
 	"github.com/dongfang/dfchat/server/pkg/db"
 	"github.com/dongfang/dfchat/server/pkg/health"
 	"github.com/dongfang/dfchat/server/pkg/logger"
+	"github.com/dongfang/dfchat/server/pkg/mailer"
 	"github.com/dongfang/dfchat/server/pkg/middleware"
 	"github.com/dongfang/dfchat/server/pkg/storage"
 	"github.com/dongfang/dfchat/server/pkg/wsbus"
@@ -80,8 +81,17 @@ func main() {
 	fileRepo := file.NewRepo(pool)
 	liveRepo := live.NewRepo(pool)
 
+	mail := mailer.New(mailer.Config{
+		Host:     cfg.SMTPHost,
+		Port:     cfg.SMTPPort,
+		User:     cfg.SMTPUser,
+		Password: cfg.SMTPPassword,
+		From:     cfg.SMTPFrom,
+		UseTLS:   cfg.SMTPUseTLS,
+	}, log)
+
 	authSvc := auth.NewService(userRepo, issuer, refreshStore)
-	authHandler := auth.NewHandler(authSvc, issuer, refreshStore)
+	authHandler := auth.NewHandler(authSvc, issuer, refreshStore, mail, pool, cfg.PublicBaseURL)
 	userHandler := user.NewHandler(userRepo, issuer, refreshStore)
 	friendHandler := friend.NewHandler(friendRepo, issuer, bus)
 	groupHandler := group.NewHandler(groupRepo, issuer)

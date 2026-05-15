@@ -103,12 +103,17 @@ export default function Login() {
             {loading ? '登录中…' : '登录'}
           </button>
 
-          <p className="text-sm text-center text-ink-3">
-            没有账号？{' '}
-            <Link to="/register" className="text-brand-300 hover:text-brand-200 font-medium">
-              立即注册
+          <div className="flex items-center justify-between text-sm text-ink-3">
+            <Link to="/forgot-password" className="text-ink-3 hover:text-brand-300">
+              忘记密码？
             </Link>
-          </p>
+            <span>
+              没有账号？{' '}
+              <Link to="/register" className="text-brand-300 hover:text-brand-200 font-medium">
+                立即注册
+              </Link>
+            </span>
+          </div>
         </form>
         <p className="text-center text-xs text-ink-4 mt-6">© 东方信息 · 东风快信</p>
       </div>

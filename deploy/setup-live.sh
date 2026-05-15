@@ -20,7 +20,7 @@ trap 'echo "❌ setup-live failed on line $LINENO" >&2' ERR
 HOST="${DFCHAT_HOST:-198.44.238.9}"
 PORT="${DFCHAT_PORT:-13493}"
 USER="${DFCHAT_USER:-root}"
-PASSWORD="${DFCHAT_PASSWORD:?Set DFCHAT_PASSWORD env var (your server's SSH password)}"
+PASSWORD="${DFCHAT_PASSWORD:?Set DFCHAT_PASSWORD env var (your server SSH password)}"
 REMOTE_DIR="${DFCHAT_REMOTE_DIR:-/opt/dfchat}"
 BASE_DOMAIN="${BASE_DOMAIN:-dfchat.chat}"
 APP_DOMAIN="${APP_DOMAIN:-app.${BASE_DOMAIN}}"

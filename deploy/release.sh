@@ -16,7 +16,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
-PASS="${DFCHAT_PASSWORD:?Set DFCHAT_PASSWORD env var}"
+# Auto-load $ROOT/.env.local if present (gitignored). One-shot way to
+# configure DFCHAT_PASSWORD etc. without polluting your shell rc:
+#   echo 'export DFCHAT_PASSWORD=xxx' > .env.local
+[ -f "$ROOT/.env.local" ] && set -a && . "$ROOT/.env.local" && set +a
+
+PASS="${DFCHAT_PASSWORD:?Set DFCHAT_PASSWORD env var (e.g. in .env.local)}"
 HOST="${DFCHAT_HOST:-198.44.238.9}"
 PORT="${DFCHAT_PORT:-13493}"
 USER="${DFCHAT_USER:-root}"

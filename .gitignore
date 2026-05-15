@@ -11,6 +11,8 @@ Thumbs.db
 .env
 .env.local
 *.env
+# Convention: local secrets for deploy scripts go here (root .env.local).
+# Auto-loaded by deploy/release.sh.
 
 # Server (Go)
 server/bin/

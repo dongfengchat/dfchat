@@ -15,7 +15,7 @@ REMOTE_NAME="${2:-$(basename "$LOCAL")}"
 HOST="${DFCHAT_HOST:-198.44.238.9}"
 PORT="${DFCHAT_PORT:-13493}"
 USER="${DFCHAT_USER:-root}"
-PASSWORD="${DFCHAT_PASSWORD:?Set DFCHAT_PASSWORD env var (your server's SSH password)}"
+PASSWORD="${DFCHAT_PASSWORD:?Set DFCHAT_PASSWORD env var (your server SSH password)}"
 
 if [[ ! -f "$LOCAL" ]]; then
   echo "❌ file not found: $LOCAL"; exit 1

@@ -42,6 +42,20 @@ type Config struct {
 	TurnSecret     string // shared --static-auth-secret with coturn
 	TurnHost       string // public host clients reach, e.g. dfchat.chat
 	TurnTLSEnabled bool   // turns:5349 enabled?
+
+	// Outbound SMTP for email verification / password reset.
+	// Empty SMTPHost → mailer logs to stdout instead of sending (dev mode).
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUser     string
+	SMTPPassword string
+	SMTPFrom     string // From: header, e.g. "DFCHAT <no-reply@dfchat.chat>"
+	SMTPUseTLS   bool   // true for implicit TLS (port 465), false for STARTTLS
+
+	// Public base URL used to construct email links (verification, reset).
+	// e.g. "https://dfchat.chat" so the link looks like
+	//   https://dfchat.chat/verify-email?token=xxxxx
+	PublicBaseURL string
 }
 
 func Load() (*Config, error) {
@@ -74,6 +88,14 @@ func Load() (*Config, error) {
 		TurnSecret:     getEnv("TURN_SECRET", ""),
 		TurnHost:       getEnv("TURN_HOST", ""),
 		TurnTLSEnabled: getEnv("TURN_TLS_ENABLED", "false") == "true",
+
+		SMTPHost:      getEnv("SMTP_HOST", ""),
+		SMTPPort:      getEnvInt("SMTP_PORT", 587),
+		SMTPUser:      getEnv("SMTP_USER", ""),
+		SMTPPassword:  getEnv("SMTP_PASSWORD", ""),
+		SMTPFrom:      getEnv("SMTP_FROM", ""),
+		SMTPUseTLS:    getEnv("SMTP_USE_TLS", "false") == "true",
+		PublicBaseURL: getEnv("PUBLIC_BASE_URL", "https://dfchat.chat"),
 	}
 
 	if cfg.DatabaseURL == "" {
