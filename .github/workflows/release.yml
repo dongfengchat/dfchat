@@ -4,13 +4,13 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  workflow_dispatch:  # manual run from Actions tab
+  workflow_dispatch:
 
 permissions:
-  contents: write    # needed to create GitHub Release
+  contents: write
 
 jobs:
-  build:
+  build-mac-linux:
     name: Build (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -19,36 +19,25 @@ jobs:
           - os: macos-latest
             script: dist:mac
             artifacts: client/release/*.dmg
-          - os: windows-latest
-            script: dist:win
-            artifacts: client/release/*.exe
           - os: ubuntu-latest
             script: dist:linux
             artifacts: client/release/*.AppImage
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: client/package-lock.json
-
       - name: Install deps
         run: npm ci
         working-directory: client
-
       - name: Build
         run: npm run ${{ matrix.script }}
         working-directory: client
         env:
-          # Disable electron-builder's auto-discovery of Apple identities;
-          # we ad-hoc sign via afterPack.cjs (no Developer ID yet).
           CSC_IDENTITY_AUTO_DISCOVERY: false
-          # Skip notarization (no Apple Developer ID yet).
-          # When you have one, set APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID secrets.
-
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -59,39 +48,68 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # === Optional: Sign Windows .exe via SignPath.io (free for OSS) ===
-  # Uncomment after you've onboarded the project at https://signpath.io
-  # and configured these GitHub Secrets:
-  #   SIGNPATH_API_TOKEN
-  #   SIGNPATH_ORGANIZATION_ID
-  #   SIGNPATH_PROJECT_SLUG
-  #   SIGNPATH_SIGNING_POLICY_SLUG
-  #
-  # sign-windows:
-  #   needs: build
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Download unsigned .exe from release
-  #       run: |
-  #         gh release download ${{ github.ref_name }} \
-  #           --pattern '*.exe' --dir ./signing/ \
-  #           --repo ${{ github.repository }}
-  #       env:
-  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #     - name: Submit to SignPath
-  #       uses: signpath/github-action-submit-signing-request@v1
-  #       with:
-  #         api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-  #         organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
-  #         project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
-  #         signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
-  #         artifact-configuration-slug: 'dfchat-exe'
-  #         github-artifact-id: <set after first run>
-  #         wait-for-completion: true
-  #         output-artifact-directory: ./signed/
-  #     - name: Re-upload signed .exe
-  #       run: |
-  #         gh release upload ${{ github.ref_name }} ./signed/*.exe --clobber \
-  #           --repo ${{ github.repository }}
-  #       env:
-  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  build-windows:
+    name: Build Windows (+ SignPath)
+    runs-on: windows-latest
+    env:
+      HAS_SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' && 'yes' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: client/package-lock.json
+      - name: Install deps
+        run: npm ci
+        working-directory: client
+      - name: Build
+        run: npm run dist:win
+        working-directory: client
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      # SignPath needs the .exe as a GitHub Actions artifact (not release asset).
+      - name: Upload unsigned .exe as Actions artifact
+        id: upload-unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: dfchat-windows-unsigned
+          path: client/release/*.exe
+          retention-days: 7
+
+      - name: Submit to SignPath for signing
+        if: env.HAS_SIGNPATH == 'yes'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: client/release-signed/
+
+      # Pick signed .exe if SignPath ran, otherwise unsigned.
+      - name: Stage installer for release
+        shell: bash
+        run: |
+          mkdir -p client/release-final
+          if [ -d client/release-signed ] && ls client/release-signed/*.exe >/dev/null 2>&1; then
+            cp client/release-signed/*.exe client/release-final/
+            echo "Using signed .exe"
+          else
+            cp client/release/*.exe client/release-final/
+            echo "Using unsigned .exe (no SignPath token configured)"
+          fi
+          ls -la client/release-final/
+
+      - name: Upload Windows installer to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: client/release-final/*.exe
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
