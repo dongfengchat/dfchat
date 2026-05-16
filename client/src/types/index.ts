@@ -1,5 +1,6 @@
 export interface User {
   id: string;
+  accountNo: string; // public 6+ digit number — what users see / type into login
   username: string;
   email: string;
   nickname: string;

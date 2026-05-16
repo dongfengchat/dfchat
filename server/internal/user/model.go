@@ -4,6 +4,7 @@ import "time"
 
 type User struct {
 	ID            int64     `json:"id,string"`
+	AccountNo     int64     `json:"accountNo,string"` // public 6+ digit number shown to users / used for login
 	Username      string    `json:"username"`
 	Email         string    `json:"email"`
 	Nickname      string    `json:"nickname"`

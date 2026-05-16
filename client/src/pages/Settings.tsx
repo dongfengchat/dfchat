@@ -214,12 +214,18 @@ function ProfileTab({ me, onSaved }: { me: ReturnType<typeof useUserStore.getSta
 
       <EmailRow email={me?.email ?? ''} verified={!!me?.emailVerified} onVerified={() => onSaved({ ...(me as NonNullable<typeof me>), emailVerified: true })} />
 
-      {/* Read-only account metadata. Handy for support tickets ("我的账号
-          ID 是 42") and account-age sanity checks. */}
+      {/* Read-only account metadata. accountNo is the public 6+ digit
+          number (also accepted as a login identifier); the internal row
+          id is never shown. */}
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
-          <label className="text-xs text-ink-3">账号 ID</label>
-          <input className="input opacity-60" value={me?.id ?? ''} disabled />
+          <label className="text-xs text-ink-3">账号</label>
+          <input
+            className="input opacity-60 font-mono tracking-wider"
+            value={me?.accountNo ?? ''}
+            disabled
+          />
+          <div className="text-[11px] text-ink-4">登录时可以用这个账号 + 密码</div>
         </div>
         <div className="space-y-1.5">
           <label className="text-xs text-ink-3">注册时间</label>

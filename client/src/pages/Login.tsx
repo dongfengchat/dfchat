@@ -64,16 +64,18 @@ export default function Login() {
           )}
 
           <div className="space-y-1.5">
-            <label className="text-xs text-ink-3">用户名或邮箱</label>
+            <label className="text-xs text-ink-3">账号 / 用户名 / 邮箱</label>
             <input
               className="input"
               type="text"
-              placeholder="alice 或 alice@example.com"
+              placeholder="100123 · alice · alice@gmail.com"
               value={loginValue}
               onChange={(e) => setLoginValue(e.target.value)}
               required
               autoFocus
+              autoComplete="username"
             />
+            <div className="text-[11px] text-ink-4">三种登录方式都支持</div>
           </div>
           <div className="space-y-1.5">
             <label className="text-xs text-ink-3">密码</label>

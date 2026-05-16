@@ -145,7 +145,7 @@ func (h *Handler) sendVerification(c *gin.Context) {
 func (h *Handler) verifyEmail(c *gin.Context) {
 	tok := c.Query("token")
 	if tok == "" {
-		c.String(http.StatusBadRequest, "缺少 token 参数")
+		renderHTML(c, http.StatusBadRequest, pageError, "链接无效", "缺少 token 参数。请回到 DFCHAT 客户端重新发送验证邮件。", "")
 		return
 	}
 
@@ -162,11 +162,13 @@ func (h *Handler) verifyEmail(c *gin.Context) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Either the token never existed, was already used, or expired.
 		// We don't distinguish — all three are "click resend".
-		c.String(http.StatusBadRequest, "验证链接无效、已使用或已过期。请回到客户端重新发送。")
+		renderHTML(c, http.StatusBadRequest, pageError, "链接已失效",
+			"这个验证链接无效、已使用，或已超过 24 小时有效期。请回到 DFCHAT 客户端重新发送一封验证邮件。", "")
 		return
 	}
 	if err != nil {
-		c.String(http.StatusInternalServerError, "内部错误")
+		renderHTML(c, http.StatusInternalServerError, pageError, "服务器错误",
+			"邮箱验证暂时无法完成，请稍后再试或联系支持。", "")
 		return
 	}
 
@@ -175,7 +177,8 @@ func (h *Handler) verifyEmail(c *gin.Context) {
 	_, _ = h.pool.Exec(c.Request.Context(),
 		`DELETE FROM email_verify_tokens WHERE user_id = $1`, uid)
 
-	c.String(http.StatusOK, "✅ 邮箱验证成功！可以回到 DFCHAT 客户端继续使用。")
+	renderHTML(c, http.StatusOK, pageSuccess, "邮箱验证成功",
+		"你的 DFCHAT 邮箱已通过验证。现在可以正常接收找回密码邮件以及修改邮箱所需的确认链接了。", "")
 }
 
 // ===== Email change (with double-confirmation) =====
@@ -287,7 +290,7 @@ func (h *Handler) requestEmailChange(c *gin.Context) {
 func (h *Handler) confirmEmailChange(c *gin.Context) {
 	tok := c.Query("token")
 	if tok == "" {
-		c.String(http.StatusBadRequest, "缺少 token 参数")
+		renderHTML(c, http.StatusBadRequest, pageError, "链接无效", "缺少 token 参数。请回到 DFCHAT 客户端重新申请。", "")
 		return
 	}
 
@@ -298,11 +301,13 @@ func (h *Handler) confirmEmailChange(c *gin.Context) {
 		WHERE token = $1 AND expires_at > now()
 		RETURNING user_id, new_email`, tok).Scan(&uid, &newEmail)
 	if errors.Is(err, pgx.ErrNoRows) {
-		c.String(http.StatusBadRequest, "确认链接无效、已使用或已过期。请回到客户端重新申请。")
+		renderHTML(c, http.StatusBadRequest, pageError, "确认链接已失效",
+			"这个链接无效、已使用，或已超过 1 小时有效期。请回到 DFCHAT 客户端重新发起邮箱变更。", "")
 		return
 	}
 	if err != nil {
-		c.String(http.StatusInternalServerError, "内部错误")
+		renderHTML(c, http.StatusInternalServerError, pageError, "服务器错误",
+			"邮箱变更暂时无法完成，请稍后再试。", "")
 		return
 	}
 
@@ -311,11 +316,12 @@ func (h *Handler) confirmEmailChange(c *gin.Context) {
 	tag, err := h.pool.Exec(c.Request.Context(),
 		`UPDATE users SET email = $1, email_verified = true WHERE id = $2`, newEmail, uid)
 	if err != nil {
-		c.String(http.StatusConflict, "这个邮箱已被另一个账号占用，请换一个再试。")
+		renderHTML(c, http.StatusConflict, pageError, "邮箱已被占用",
+			"这个邮箱在你点击确认链接之前被其他账号注册了。请回到 DFCHAT 客户端换一个邮箱再试。", "")
 		return
 	}
 	if tag.RowsAffected() != 1 {
-		c.String(http.StatusInternalServerError, "更新失败，请重试")
+		renderHTML(c, http.StatusInternalServerError, pageError, "更新失败", "请回到客户端重试。", "")
 		return
 	}
 	// Belt-and-suspenders: any other outstanding requests for this user
@@ -324,7 +330,16 @@ func (h *Handler) confirmEmailChange(c *gin.Context) {
 	_, _ = h.pool.Exec(c.Request.Context(),
 		`DELETE FROM email_change_requests WHERE user_id = $1`, uid)
 
-	c.String(http.StatusOK, "✅ 邮箱已更新为 "+newEmail+"。回到 DFCHAT 客户端即可。")
+	renderHTML(c, http.StatusOK, pageSuccess, "邮箱已更新",
+		"你的 DFCHAT 账号邮箱已成功变更。今后找回密码、再次修改邮箱、登录验证都会使用这个新邮箱。",
+		newEmail)
+}
+
+// renderHTML writes a branded HTML response page. Centralised so the
+// content-type header and Cache-Control are set consistently.
+func renderHTML(c *gin.Context, status int, variant pageVariant, title, body, detail string) {
+	c.Header("Cache-Control", "no-store")
+	c.Data(status, "text/html; charset=utf-8", []byte(htmlPage(variant, title, body, detail)))
 }
 
 type forgotPasswordReq struct {

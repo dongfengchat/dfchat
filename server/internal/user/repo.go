@@ -30,11 +30,11 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (*User, error) {
 	const q = `
 		INSERT INTO users (username, email, password_hash, nickname)
 		VALUES ($1, $2, $3, $4)
-		RETURNING id, username, email, nickname, COALESCE(avatar_url, ''), COALESCE(bio, ''),
+		RETURNING id, account_no, username, email, nickname, COALESCE(avatar_url, ''), COALESCE(bio, ''),
 		          status, email_verified, is_admin, created_at`
 	row := r.pool.QueryRow(ctx, q, p.Username, p.Email, p.PasswordHash, p.Nickname)
 	u := &User{}
-	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.Nickname, &u.AvatarURL, &u.Bio,
+	if err := row.Scan(&u.ID, &u.AccountNo, &u.Username, &u.Email, &u.Nickname, &u.AvatarURL, &u.Bio,
 		&u.Status, &u.EmailVerified, &u.IsAdmin, &u.CreatedAt); err != nil {
 		return nil, err
 	}
@@ -48,15 +48,25 @@ type Credentials struct {
 }
 
 func (r *Repo) FindCredentialsByLogin(ctx context.Context, login string) (*Credentials, error) {
-	// Username is matched case-sensitively (it's stored exactly as the user
-	// typed at registration). Email is matched case-insensitively against
-	// the stored lower-cased copy — emails are RFC-defined case-insensitive
-	// on the local part, and we store them lower-cased on register so we
-	// can use a simple equality on the indexed column.
+	// Three accepted forms:
+	//   - username       (case-sensitive, as typed at register)
+	//   - email          (case-insensitive against lower-cased stored copy)
+	//   - account_no     (numeric; only attempted when login parses as int)
+	//
+	// account_no_input is the numeric coercion; if `login` isn't a valid
+	// int, $2 ends up 0 which can't match any real account_no (sequence
+	// starts at 100001), so the OR short-circuits cleanly.
+	var accountNo int64
+	if n, err := parsePositiveInt(login); err == nil {
+		accountNo = n
+	}
 	const q = `SELECT id, password_hash, status FROM users
-		WHERE username = $1 OR email = lower($1) LIMIT 1`
+		WHERE username = $1
+		   OR email = lower($1)
+		   OR account_no = $2
+		LIMIT 1`
 	c := &Credentials{}
-	err := r.pool.QueryRow(ctx, q, login).Scan(&c.ID, &c.PasswordHash, &c.Status)
+	err := r.pool.QueryRow(ctx, q, login, accountNo).Scan(&c.ID, &c.PasswordHash, &c.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -66,11 +76,31 @@ func (r *Repo) FindCredentialsByLogin(ctx context.Context, login string) (*Crede
 	return c, nil
 }
 
+// parsePositiveInt accepts only digits, returns the value. We're avoiding
+// strconv.Atoi because it accepts leading "+" / "-" / whitespace, none of
+// which should match an account number.
+func parsePositiveInt(s string) (int64, error) {
+	if s == "" {
+		return 0, errors.New("empty")
+	}
+	var n int64
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, errors.New("non-digit")
+		}
+		n = n*10 + int64(r-'0')
+		if n > 1<<53 {
+			return 0, errors.New("overflow")
+		}
+	}
+	return n, nil
+}
+
 func (r *Repo) FindByID(ctx context.Context, id int64) (*User, error) {
-	const q = `SELECT id, username, email, nickname, COALESCE(avatar_url, ''), COALESCE(bio, ''),
+	const q = `SELECT id, account_no, username, email, nickname, COALESCE(avatar_url, ''), COALESCE(bio, ''),
 		status, email_verified, is_admin, created_at FROM users WHERE id = $1`
 	u := &User{}
-	err := r.pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.Username, &u.Email, &u.Nickname,
+	err := r.pool.QueryRow(ctx, q, id).Scan(&u.ID, &u.AccountNo, &u.Username, &u.Email, &u.Nickname,
 		&u.AvatarURL, &u.Bio, &u.Status, &u.EmailVerified, &u.IsAdmin, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -155,10 +185,10 @@ func (r *Repo) UpdateProfile(ctx context.Context, id int64, p UpdateProfileParam
 	}
 	args = append(args, id)
 	q := "UPDATE users SET " + joinComma(sets) + ", updated_at = now() WHERE id = $" + itoa(idx) + `
-		RETURNING id, username, email, nickname, COALESCE(avatar_url, ''), COALESCE(bio, ''),
+		RETURNING id, account_no, username, email, nickname, COALESCE(avatar_url, ''), COALESCE(bio, ''),
 		          status, email_verified, is_admin, created_at`
 	u := &User{}
-	err := r.pool.QueryRow(ctx, q, args...).Scan(&u.ID, &u.Username, &u.Email, &u.Nickname,
+	err := r.pool.QueryRow(ctx, q, args...).Scan(&u.ID, &u.AccountNo, &u.Username, &u.Email, &u.Nickname,
 		&u.AvatarURL, &u.Bio, &u.Status, &u.EmailVerified, &u.IsAdmin, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
