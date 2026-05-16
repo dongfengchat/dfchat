@@ -1,6 +1,6 @@
 {
   "name": "dfchat-client",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "DFCHAT desktop client (Electron + React)",
   "main": "dist-electron/main.js",
   "type": "module",
