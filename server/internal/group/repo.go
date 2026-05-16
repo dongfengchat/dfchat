@@ -393,6 +393,106 @@ func (r *Repo) Kick(ctx context.Context, groupID, userID int64) error {
 }
 
 // IsMember reports whether userID belongs to groupID.
+// TransferOwnershipForLeavingUser scans every group owned by oldOwnerID
+// and tries to keep the group alive after the owner's account is gone:
+//
+//   1. Promote the longest-tenured admin (role=1) to owner. Their
+//      group_members.role goes to 2 and groups.owner_id is rewritten.
+//   2. If no admin, promote the longest-tenured remaining member.
+//   3. If no remaining member at all, mark the group as archived
+//      (is_archived=TRUE) — it becomes a read-only memorial.
+//
+// Idempotent: subsequent calls on the same user do nothing. Designed to
+// be invoked right before user.SoftDelete so the owner_id never dangles
+// at a scrubbed account.
+func (r *Repo) TransferOwnershipForLeavingUser(ctx context.Context, oldOwnerID int64) error {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id FROM groups WHERE owner_id = $1`, oldOwnerID)
+	if err != nil {
+		return err
+	}
+	groupIDs := make([]int64, 0)
+	for rows.Next() {
+		var gid int64
+		if err := rows.Scan(&gid); err != nil {
+			rows.Close()
+			return err
+		}
+		groupIDs = append(groupIDs, gid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, gid := range groupIDs {
+		if err := r.transferOneGroup(ctx, gid, oldOwnerID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repo) transferOneGroup(ctx context.Context, groupID, oldOwnerID int64) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Pick a new owner: prefer the oldest admin, fall back to oldest
+	// regular member. NULL means "no other member" → archive.
+	var heirID *int64
+	err = tx.QueryRow(ctx, `
+		SELECT user_id FROM group_members
+		WHERE group_id = $1 AND user_id <> $2
+		ORDER BY CASE WHEN role = 1 THEN 0 ELSE 1 END,
+		         joined_at ASC, user_id ASC
+		LIMIT 1`, groupID, oldOwnerID).Scan(&heirID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	if heirID == nil {
+		// No survivor — archive and remove old owner row.
+		if _, err := tx.Exec(ctx,
+			`UPDATE groups SET is_archived = TRUE WHERE id = $1`, groupID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`,
+			groupID, oldOwnerID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	// Promote heir, demote/remove old owner. owner_id flip + role flip.
+	if _, err := tx.Exec(ctx,
+		`UPDATE groups SET owner_id = $1 WHERE id = $2`, *heirID, groupID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE group_members SET role = 2 WHERE group_id = $1 AND user_id = $2`,
+		groupID, *heirID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`,
+		groupID, oldOwnerID); err != nil {
+		return err
+	}
+	// Also drop the conv-member row so the leaving user loses access.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM conversation_members WHERE user_id = $1
+		   AND (conversation_id = $2
+		     OR conversation_id IN (SELECT 'c_'||id::text FROM channels WHERE group_id = $3))`,
+		oldOwnerID, GroupConvID(groupID), groupID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // SharesGroupWith reports whether two users belong to at least one
 // group in common. Used by the WS relay backend to decide whether `a`
 // is allowed to send WebRTC signaling or typing pings to `b` even if

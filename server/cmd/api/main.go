@@ -92,7 +92,7 @@ func main() {
 
 	authSvc := auth.NewService(userRepo, issuer, refreshStore)
 	authHandler := auth.NewHandler(authSvc, issuer, refreshStore, mail, pool, cfg.PublicBaseURL)
-	userHandler := user.NewHandler(userRepo, issuer, refreshStore)
+	userHandler := user.NewHandler(userRepo, issuer, refreshStore, groupRepo)
 	friendHandler := friend.NewHandler(friendRepo, issuer, bus)
 	groupHandler := group.NewHandler(groupRepo, issuer)
 	channelHandler := channel.NewHandler(channelRepo, groupRepo, issuer)

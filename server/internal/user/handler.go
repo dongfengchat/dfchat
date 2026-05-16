@@ -19,14 +19,23 @@ type SessionRevoker interface {
 	RevokeAllForUser(ctx context.Context, userID int64) error
 }
 
-type Handler struct {
-	repo     *Repo
-	issuer   *auth.Issuer
-	revoker  SessionRevoker
+// GroupOwnerTransferrer hands off ownership of groups owned by a user
+// who is about to be soft-deleted, so the groups don't end up pointing
+// at a scrubbed identity. Implemented by *group.Repo. Declared here to
+// avoid a user → group import cycle.
+type GroupOwnerTransferrer interface {
+	TransferOwnershipForLeavingUser(ctx context.Context, oldOwnerID int64) error
 }
 
-func NewHandler(repo *Repo, issuer *auth.Issuer, revoker SessionRevoker) *Handler {
-	return &Handler{repo: repo, issuer: issuer, revoker: revoker}
+type Handler struct {
+	repo            *Repo
+	issuer          *auth.Issuer
+	revoker         SessionRevoker
+	ownerTransferer GroupOwnerTransferrer
+}
+
+func NewHandler(repo *Repo, issuer *auth.Issuer, revoker SessionRevoker, owner GroupOwnerTransferrer) *Handler {
+	return &Handler{repo: repo, issuer: issuer, revoker: revoker, ownerTransferer: owner}
 }
 
 func (h *Handler) Register(rg *gin.RouterGroup) {
@@ -72,6 +81,18 @@ func (h *Handler) deleteMe(c *gin.Context) {
 	if err := bcrypt.CompareHashAndPassword([]byte(creds.PasswordHash), []byte(req.Password)); err != nil {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 10071, "message": "password mismatch"})
 		return
+	}
+	// Transfer ownership of any owned groups BEFORE scrubbing the user
+	// row. Without this step the groups end up owned by "已注销用户",
+	// nobody can change settings / invite codes, and the group is
+	// effectively bricked. Failure here is non-fatal but logged via
+	// the eventual error response — better to let the user delete than
+	// strand them.
+	if h.ownerTransferer != nil {
+		if err := h.ownerTransferer.TransferOwnershipForLeavingUser(c.Request.Context(), uid); err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+			return
+		}
 	}
 	if err := h.repo.SoftDelete(c.Request.Context(), uid); err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
