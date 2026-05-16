@@ -91,6 +91,7 @@ export async function register(input: {
   nickname?: string;
   accountNo: string;
   selectionToken: string;
+  website?: string; // honeypot — always "" for real users
 }): Promise<User> {
   try {
     const res = await api.post<{ user: User }>('/api/v1/auth/register', input);

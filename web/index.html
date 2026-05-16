@@ -1282,6 +1282,18 @@
       <h2 class="reveal">免费注册</h2>
       <p class="muted">先挑一个号码 · 再填资料 · 不需要手机号</p>
       <form id="reg-form" autocomplete="off">
+        <!--
+          Honeypot — hidden field that real users never see / fill.
+          Naive bots iterate every named input and fill them all. The
+          server silently 200s when this is non-empty so the bot thinks
+          it succeeded; no real account is created.
+          aria-hidden + tabindex=-1 so screen readers + keyboard users
+          skip it; position off-screen so layout isn't affected.
+        -->
+        <input type="text" name="website" tabindex="-1" aria-hidden="true"
+               autocomplete="off"
+               style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;" />
+
         <!-- Step 1: pick a number -->
         <div class="field">
           <label>🎲 选择你的账号 <span class="muted" id="picker-status">正在摇号…</span></label>

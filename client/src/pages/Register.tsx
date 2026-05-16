@@ -70,8 +70,11 @@ export default function Register() {
   const [drawing, setDrawing] = useState(false);
   const [drawError, setDrawError] = useState<string | null>(null);
 
-  // Step 2: form
-  const [form, setForm] = useState({ username: '', email: '', password: '', confirmPassword: '', nickname: '' });
+  // Step 2: form. `website` is a honeypot field — always empty for real
+  // users (off-screen, aria-hidden, tab-index -1). The server silently
+  // 200s a fake response when it arrives non-empty, so naive bots that
+  // iterate every named input think they succeeded.
+  const [form, setForm] = useState({ username: '', email: '', password: '', confirmPassword: '', nickname: '', website: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -163,6 +166,7 @@ export default function Register() {
         nickname: form.nickname.trim() || form.username.trim(),
         accountNo: pickedNo!,
         selectionToken,
+        website: form.website, // honeypot — always "" for real users
       });
       try {
         const res = await login(form.username.trim(), form.password);
@@ -274,6 +278,18 @@ export default function Register() {
           </div>
         ) : (
           <form onSubmit={onSubmit} className="card p-7 anim-fade shadow-pop space-y-4">
+            {/* Honeypot — see comment on form state. Off-screen, not
+                tab-stop, not in a11y tree. Real users never touch it. */}
+            <input
+              type="text"
+              name="website"
+              tabIndex={-1}
+              aria-hidden="true"
+              autoComplete="off"
+              value={form.website}
+              onChange={(e) => set('website', e.target.value)}
+              style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, opacity: 0 }}
+            />
             <div className="text-center">
               <h1 className="text-xl font-semibold">填写注册信息</h1>
               <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-500/15 border border-brand-500/40">

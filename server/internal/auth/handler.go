@@ -480,12 +480,40 @@ type registerReq struct {
 	Nickname       string `json:"nickname"`
 	AccountNo      string `json:"accountNo"`      // chosen from the draw
 	SelectionToken string `json:"selectionToken"` // proves they got it from a real draw
+	// Honeypot: a hidden form field that real users never see / fill.
+	// Naive bots iterate every named input. Non-empty here = bot, we
+	// silently 200 without doing anything (the bot sees "success" and
+	// moves on; we keep the slot for humans).
+	Website string `json:"website"`
 }
+
+const (
+	// Per-IP 24-hour caps. RateLimitStrict is per-second; these are
+	// absolute daily ceilings to stop slow patient spammers.
+	ipDailyRegisterLimit = 5
+	ipDailyDrawLimit     = 30
+)
 
 func (h *Handler) register(c *gin.Context) {
 	var req registerReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, http.StatusBadRequest, 10010, "请求格式错误")
+		return
+	}
+	// Honeypot: bots fill every input they see. The field is hidden in
+	// the real UI (position: absolute; left: -9999px) so any non-empty
+	// value here means scripted form-fill. Return a fake 201 so the bot
+	// thinks it succeeded and moves on — buys us time to detect and ban.
+	if req.Website != "" {
+		c.JSON(http.StatusCreated, gin.H{"user": gin.H{"id": "0", "accountNo": "0"}})
+		return
+	}
+	// Per-IP 24h hard cap on successful registrations. RateLimitStrict
+	// catches bursts; this catches the patient "5 minutes apart" spammer.
+	if count, over := hitIPDailyCap(c.ClientIP(), "register", ipDailyRegisterLimit); over {
+		fail(c, http.StatusTooManyRequests, 10096,
+			"今日注册次数已达上限，请明天再试或更换网络")
+		_ = count
 		return
 	}
 	if !usernameRe.MatchString(req.Username) {
@@ -508,6 +536,14 @@ func (h *Handler) register(c *gin.Context) {
 	}
 	if isDisposableEmail(req.Email) {
 		fail(c, http.StatusBadRequest, 10019, "请使用真实邮箱注册，一次性邮箱不被允许")
+		return
+	}
+	// MX-record check catches fresh disposable domains that haven't
+	// made our static list yet, plus typos like "foo@gmial.com" where
+	// the domain literally doesn't accept mail. Fails open on transient
+	// DNS errors so a flaky resolver doesn't block honest users.
+	if hasMX, _ := emailDomainHasMX(c.Request.Context(), req.Email); !hasMX {
+		fail(c, http.StatusBadRequest, 10097, "邮箱域名不存在或不接收邮件，请检查后重试")
 		return
 	}
 	if len(req.Password) < 8 {
@@ -691,26 +727,37 @@ type loginReq struct {
 func (h *Handler) login(c *gin.Context) {
 	var req loginReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, 10020, "invalid request body")
+		fail(c, http.StatusBadRequest, 10020, "请求格式错误")
 		return
 	}
 	if req.Login == "" || req.Password == "" {
-		fail(c, http.StatusBadRequest, 10021, "login and password required")
+		fail(c, http.StatusBadRequest, 10021, "账号和密码不能为空")
+		return
+	}
+	// Per-account lockout: 5 wrong passwords in 15 min → 15-min lock,
+	// keyed on the login string. Defeats password-spray across IPs.
+	if locked, remaining := isLoginLocked(req.Login); locked {
+		fail(c, http.StatusTooManyRequests, 10098,
+			fmt.Sprintf("该账号尝试过多，请 %d 分钟后再试", int(remaining.Minutes())+1))
 		return
 	}
 
 	res, err := h.svc.Login(c.Request.Context(), req.Login, req.Password, c.ClientIP(), c.Request.UserAgent())
 	switch {
 	case errors.Is(err, ErrInvalidCredentials):
-		fail(c, http.StatusUnauthorized, 10022, "invalid username or password")
+		recordLoginFailure(req.Login)
+		fail(c, http.StatusUnauthorized, 10022, "账号或密码错误")
 		return
 	case errors.Is(err, ErrAccountDisabled):
-		fail(c, http.StatusForbidden, 10023, "account disabled")
+		fail(c, http.StatusForbidden, 10023, "账号已被停用")
 		return
 	case err != nil:
-		fail(c, http.StatusInternalServerError, 50001, "internal error")
+		fail(c, http.StatusInternalServerError, 50001, "服务器内部错误")
 		return
 	}
+	// Successful auth — clear the failure counter so honest typos
+	// don't accumulate across login sessions.
+	recordLoginSuccess(req.Login)
 	c.JSON(http.StatusOK, gin.H{
 		"accessToken":  res.AccessToken,
 		"refreshToken": res.RefreshToken,

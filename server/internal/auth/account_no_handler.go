@@ -30,6 +30,14 @@ const (
 // number.
 func (h *Handler) drawAccountNumbers(c *gin.Context) {
 	clientIP := c.ClientIP()
+	// Per-IP 24h cap on draws. Reservations live 10 minutes, so a single
+	// IP doing 30 draws (= 300 reservations) is the absolute max — well
+	// under 5% of one segment's 10k stock. Stops slow pool-drainers.
+	if _, over := hitIPDailyCap(clientIP, "draw", ipDailyDrawLimit); over {
+		fail(c, http.StatusTooManyRequests, 10099,
+			"今日摇号次数已达上限，请明天再试或更换网络")
+		return
+	}
 	if err := h.ensureSegmentCapacity(c.Request.Context()); err != nil {
 		// Non-fatal — fall through and try anyway. If there's truly
 		// nothing left we'll catch it below.
