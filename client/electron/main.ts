@@ -228,7 +228,9 @@ function compareSemver(a: string, b: string): number {
 function setupAutoUpdater() {
   if (isDev) return;
   const current = app.getVersion();
+  let lastCheckAt = 0;
   const check = async () => {
+    lastCheckAt = Date.now();
     const m = await fetchManifest();
     if (!m?.version) return;
     if (compareSemver(m.version, current) > 0) {
@@ -242,6 +244,14 @@ function setupAutoUpdater() {
   // First check 5s after start; recheck every 6h while the app is open.
   setTimeout(check, 5000);
   setInterval(check, 6 * 60 * 60 * 1000);
+  // Also recheck when the user re-focuses the window after being away
+  // for 30+ minutes — catches "came back from lunch, the new version
+  // just shipped" case without polling every minute.
+  app.on('browser-window-focus', () => {
+    if (Date.now() - lastCheckAt > 30 * 60 * 1000) {
+      check();
+    }
+  });
 }
 
 app.whenReady().then(() => {

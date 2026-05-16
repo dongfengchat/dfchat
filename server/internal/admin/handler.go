@@ -30,6 +30,7 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	g.GET("/stats", h.stats)
 	g.GET("/users", h.listUsers)
 	g.PATCH("/users/:id/status", h.patchUserStatus)
+	g.GET("/account-pool", h.accountPoolStats)
 
 	// Live moderation — platform admin view + actions on any room.
 	g.GET("/live/rooms", h.listLiveRooms)
@@ -69,16 +70,24 @@ func (h *Handler) stats(c *gin.Context) {
 }
 
 type adminUser struct {
-	ID         int64  `json:"id,string"`
-	Username   string `json:"username"`
-	Email      string `json:"email"`
-	Nickname   string `json:"nickname"`
-	Status     int16  `json:"status"`
-	IsAdmin    bool   `json:"isAdmin"`
-	LastLogin  string `json:"lastLoginAt,omitempty"`
-	CreatedAt  string `json:"createdAt"`
+	ID               int64  `json:"id,string"`
+	AccountNo        int64  `json:"accountNo,string"`
+	Username         string `json:"username"`
+	Email            string `json:"email"`
+	Nickname         string `json:"nickname"`
+	Status           int16  `json:"status"`
+	IsAdmin          bool   `json:"isAdmin"`
+	EmailVerified    bool   `json:"emailVerified"`
+	LastLogin        string `json:"lastLoginAt,omitempty"`
+	LastLoginIP      string `json:"lastLoginIp,omitempty"`
+	RegisteredFromIP string `json:"registeredFromIp,omitempty"`
+	CreatedAt        string `json:"createdAt"`
 }
 
+// listUsers returns paginated user rows for the admin console. Search
+// hits username / email / nickname / account_no — admins typically know
+// one of these from a support ticket. Sort newest-first so spam waves
+// surface immediately.
 func (h *Handler) listUsers(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 	if limit <= 0 || limit > 200 {
@@ -86,16 +95,32 @@ func (h *Handler) listUsers(c *gin.Context) {
 	}
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	search := c.Query("search")
+	ipFilter := c.Query("ip") // optional: filter by registered_from_ip OR last_login_ip
 
 	args := []any{limit, offset}
-	q := `SELECT id, username, email, nickname, status, is_admin,
-	             COALESCE(last_login_at::text, ''), created_at::text
+	q := `SELECT id, account_no, username, email, nickname, status, is_admin, email_verified,
+	             COALESCE(last_login_at::text, ''),
+	             COALESCE(last_login_ip, ''),
+	             COALESCE(registered_from_ip, ''),
+	             created_at::text
 	      FROM users`
+	where := []string{}
 	if search != "" {
-		q += ` WHERE username ILIKE $3 OR email ILIKE $3 OR nickname ILIKE $3`
 		args = append(args, "%"+search+"%")
+		where = append(where, "(username ILIKE $"+strconv.Itoa(len(args))+
+			" OR email ILIKE $"+strconv.Itoa(len(args))+
+			" OR nickname ILIKE $"+strconv.Itoa(len(args))+
+			" OR account_no::text = trim($"+strconv.Itoa(len(args))+", '%'))")
 	}
-	q += ` ORDER BY id ASC LIMIT $1 OFFSET $2`
+	if ipFilter != "" {
+		args = append(args, ipFilter)
+		where = append(where, "(registered_from_ip = $"+strconv.Itoa(len(args))+
+			" OR last_login_ip = $"+strconv.Itoa(len(args))+")")
+	}
+	if len(where) > 0 {
+		q += " WHERE " + joinAnd(where)
+	}
+	q += ` ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`
 
 	rows, err := h.pool.Query(c.Request.Context(), q, args...)
 	if err != nil {
@@ -106,13 +131,76 @@ func (h *Handler) listUsers(c *gin.Context) {
 	out := make([]adminUser, 0)
 	for rows.Next() {
 		var u adminUser
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Nickname, &u.Status, &u.IsAdmin, &u.LastLogin, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.AccountNo, &u.Username, &u.Email, &u.Nickname,
+			&u.Status, &u.IsAdmin, &u.EmailVerified,
+			&u.LastLogin, &u.LastLoginIP, &u.RegisteredFromIP, &u.CreatedAt); err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
 			return
 		}
 		out = append(out, u)
 	}
 	c.JSON(http.StatusOK, gin.H{"users": out})
+}
+
+func joinAnd(ss []string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	out := ss[0]
+	for i := 1; i < len(ss); i++ {
+		out += " AND " + ss[i]
+	}
+	return out
+}
+
+// ===== Account-number pool stats =====
+
+type segmentStat struct {
+	SegmentNo  int   `json:"segmentNo"`
+	RangeStart int64 `json:"rangeStart"`
+	RangeEnd   int64 `json:"rangeEnd"`
+	State      string `json:"state"`
+	Total      int64 `json:"total"`
+	Claimed    int64 `json:"claimed"`
+	Locked     int64 `json:"locked"`     // premium, never randomly drawn
+	Reserved   int64 `json:"reserved"`   // currently held by a draw session
+	Free       int64 `json:"free"`       // available for drawing right now
+	OpenedAt   string `json:"openedAt"`
+}
+
+// accountPoolStats returns per-segment counts. Admins use this to see
+// when the next segment will need to open, how many premium numbers
+// are still locked aside, and whether any segments are unusually drained
+// (signal of pool-drain abuse).
+func (h *Handler) accountPoolStats(c *gin.Context) {
+	rows, err := h.pool.Query(c.Request.Context(), `
+		SELECT s.segment_no, s.range_start, s.range_end, s.state, s.opened_at::text,
+		       COUNT(p.account_no) FILTER (WHERE p.account_no IS NOT NULL)                                  AS total,
+		       COUNT(p.account_no) FILTER (WHERE p.claimed_user_id IS NOT NULL)                              AS claimed,
+		       COUNT(p.account_no) FILTER (WHERE p.is_locked = TRUE AND p.claimed_user_id IS NULL)           AS locked,
+		       COUNT(p.account_no) FILTER (WHERE p.claimed_user_id IS NULL AND p.is_locked = FALSE
+		                                     AND p.reserved_until IS NOT NULL AND p.reserved_until > now()) AS reserved,
+		       COUNT(p.account_no) FILTER (WHERE p.claimed_user_id IS NULL AND p.is_locked = FALSE
+		                                     AND (p.reserved_until IS NULL OR p.reserved_until < now()))    AS free
+		FROM account_no_segments s
+		LEFT JOIN account_no_pool p ON p.segment_no = s.segment_no
+		GROUP BY s.segment_no, s.range_start, s.range_end, s.state, s.opened_at
+		ORDER BY s.segment_no`)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	defer rows.Close()
+	out := make([]segmentStat, 0)
+	for rows.Next() {
+		var s segmentStat
+		if err := rows.Scan(&s.SegmentNo, &s.RangeStart, &s.RangeEnd, &s.State, &s.OpenedAt,
+			&s.Total, &s.Claimed, &s.Locked, &s.Reserved, &s.Free); err != nil {
+			continue
+		}
+		out = append(out, s)
+	}
+	c.JSON(http.StatusOK, gin.H{"segments": out})
 }
 
 type statusReq struct {

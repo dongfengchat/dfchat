@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Check, Dices, Eye, EyeOff, Loader2, MessageSquareText, RefreshCw, X as XIcon } from 'lucide-react';
 import { drawAccountNumbers, login, refreshAccountNumbers, register } from '@/api/client';
@@ -54,15 +54,19 @@ function checkEmail(email: string): { ok: boolean; reason?: string } {
   return { ok: true };
 }
 
-type Step = 'pick' | 'form';
+type Step = 'form' | 'pick';
 
 export default function Register() {
   const navigate = useNavigate();
   const setSession = useUserStore((s) => s.setSession);
 
-  const [step, setStep] = useState<Step>('pick');
+  // Step 1 (default) is the form — basic info first. The "选择账号"
+  // moment becomes the reward at the end (progressive disclosure: ask
+  // for the unfamiliar / committal step last, when the user already
+  // has skin in the game).
+  const [step, setStep] = useState<Step>('form');
 
-  // Step 1: account-number picking
+  // Step 2: account-number picking
   const [numbers, setNumbers] = useState<string[]>([]);
   const [selectionToken, setSelectionToken] = useState('');
   const [refreshesLeft, setRefreshesLeft] = useState(0);
@@ -70,21 +74,21 @@ export default function Register() {
   const [drawing, setDrawing] = useState(false);
   const [drawError, setDrawError] = useState<string | null>(null);
 
-  // Step 2: form. `website` is a honeypot field — always empty for real
+  // Step 1: form. `website` is a honeypot field — always empty for real
   // users (off-screen, aria-hidden, tab-index -1). The server silently
   // 200s a fake response when it arrives non-empty, so naive bots that
   // iterate every named input think they succeeded.
   const [form, setForm] = useState({ username: '', email: '', password: '', confirmPassword: '', nickname: '', website: '' });
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [touched, setTouched] = useState<Partial<Record<keyof typeof form, boolean>>>({});
 
-  // Initial draw on mount.
-  useEffect(() => {
-    void doDraw();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // No auto-draw on mount — wait until the user actually proceeds to
+  // the pick step. Saves wasted reservations on people who bounce off
+  // the form. Also: per-IP 24h draw cap is real money for the user, so
+  // don't burn one before they've decided to register.
 
   async function doDraw() {
     setDrawing(true);
@@ -148,15 +152,35 @@ export default function Register() {
     return s;
   }, [form.password]);
 
-  const canSubmit = usernameOk && emailCheck.ok && pwAllOk && confirmOk && pickedNo !== null && !loading;
+  // Form step is allowed to proceed once the local validators pass.
+  const formStepOk = usernameOk && emailCheck.ok && pwAllOk && confirmOk;
+  // Final commit step requires a picked number plus the form-step gates.
+  const canSubmit = formStepOk && pickedNo !== null && !loading;
 
-  async function onSubmit(e: FormEvent) {
+  // proceedToPick — clicked on the form step. Validates locally, kicks
+  // off the first draw, and transitions to the pick screen. Loading
+  // state covers the draw round-trip so the button shows a spinner.
+  async function proceedToPick(e: FormEvent) {
     e.preventDefault();
     setError(null);
-    if (!canSubmit) {
+    if (!formStepOk) {
       setTouched({ username: true, email: true, password: true, confirmPassword: true });
       return;
     }
+    setLoading(true);
+    try {
+      await doDraw();
+      setStep('pick');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // confirmRegister — clicked on the pick step. Sends the whole payload
+  // (form fields + chosen number + selection token).
+  async function confirmRegister() {
+    setError(null);
+    if (!canSubmit) return;
     setLoading(true);
     try {
       await register({
@@ -179,10 +203,13 @@ export default function Register() {
       }
     } catch (err: any) {
       setError(err.message ?? '注册失败');
-      // If the chosen number is gone (race), kick back to picking.
+      // If the chosen number is gone (race), refresh the picker so the
+      // user keeps the form data and just picks a new number.
       if (err?.message?.includes('账号') || err?.message?.includes('摇号')) {
-        setStep('pick');
         void doDraw();
+      } else if (err?.message?.includes('用户名') || err?.message?.includes('邮箱')) {
+        // Validation hit at server — send them back to the form to fix.
+        setStep('form');
       }
     } finally {
       setLoading(false);
@@ -201,85 +228,11 @@ export default function Register() {
           <span className="text-2xl font-semibold tracking-tight">东风快信</span>
         </div>
 
-        {step === 'pick' ? (
-          <div className="card p-7 anim-fade shadow-pop space-y-5">
-            <div className="text-center">
-              <h1 className="text-xl font-semibold flex items-center justify-center gap-2">
-                <Dices size={20} className="text-brand-300" /> 选择你的账号
-              </h1>
-              <p className="text-sm text-ink-3 mt-1">从下面 10 个号码中挑一个 · 注册后无法更换</p>
-            </div>
-
-            {drawError && (
-              <div className="text-sm text-accent-red bg-accent-red/10 border border-accent-red/40 rounded-lg px-3 py-2">
-                {drawError}
-              </div>
-            )}
-
-            {drawing && numbers.length === 0 ? (
-              <div className="py-10 flex items-center justify-center gap-2 text-ink-3">
-                <Loader2 size={16} className="animate-spin" /> 正在摇号…
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-2.5">
-                {numbers.map((n) => {
-                  const active = pickedNo === n;
-                  return (
-                    <button
-                      key={n}
-                      onClick={() => setPickedNo(n)}
-                      disabled={drawing}
-                      className={`relative py-3 rounded-lg border font-mono text-base tracking-wider transition-all ${
-                        active
-                          ? 'bg-brand-500 border-brand-500 text-white shadow-md scale-[1.02]'
-                          : 'bg-bg-2 border-bg-3 text-ink-2 hover:border-brand-400 hover:bg-bg-3'
-                      }`}
-                    >
-                      {n}
-                      {active && (
-                        <Check size={14} className="absolute top-1.5 right-1.5" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            <div className="flex items-center justify-between gap-3">
-              <button
-                onClick={doRefresh}
-                disabled={drawing || refreshesLeft <= 0}
-                className="btn-secondary text-sm flex-1"
-                title={refreshesLeft <= 0 ? '刷新次数已用完，请从当前 10 个中选' : ''}
-              >
-                {drawing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                {refreshesLeft > 0 ? `换一批（还可换 ${refreshesLeft} 次）` : '换一批已用完'}
-              </button>
-              <button
-                onClick={() => setStep('form')}
-                disabled={!pickedNo || drawing}
-                className="btn-primary text-sm flex-1"
-              >
-                下一步
-              </button>
-            </div>
-
-            <div className="text-[11px] text-ink-4 leading-relaxed border-t border-bg-3 pt-3">
-              · 号码 10 分钟内有效，超时需重新摇号<br />
-              · 部分靓号已被保留 · 后续可能开放
-            </div>
-
-            <p className="text-sm text-center text-ink-3 border-t border-bg-3 pt-4">
-              已有账号？{' '}
-              <Link to="/login" className="text-brand-300 hover:text-brand-200 font-medium">
-                去登录
-              </Link>
-            </p>
-          </div>
-        ) : (
-          <form onSubmit={onSubmit} className="card p-7 anim-fade shadow-pop space-y-4">
-            {/* Honeypot — see comment on form state. Off-screen, not
-                tab-stop, not in a11y tree. Real users never touch it. */}
+        {step === 'form' ? (
+          <form onSubmit={proceedToPick} className="card p-7 anim-fade shadow-pop space-y-4">
+            {/* Honeypot — off-screen text input that real users never see
+                or fill. Naive bots iterate every named input; the server
+                fake-succeeds when this comes back non-empty. */}
             <input
               type="text"
               name="website"
@@ -291,18 +244,10 @@ export default function Register() {
               style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, opacity: 0 }}
             />
             <div className="text-center">
-              <h1 className="text-xl font-semibold">填写注册信息</h1>
-              <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-500/15 border border-brand-500/40">
-                <span className="text-xs text-ink-3">账号</span>
-                <span className="font-mono text-base text-brand-200 tracking-wider">{pickedNo}</span>
-                <button
-                  type="button"
-                  onClick={() => setStep('pick')}
-                  className="text-xs text-ink-4 hover:text-brand-300 ml-1"
-                >
-                  换
-                </button>
-              </div>
+              <h1 className="text-xl font-semibold">创建你的 DFCHAT 账号</h1>
+              <p className="text-xs text-ink-3 mt-1">
+                <span className="text-brand-300 font-medium">第 1 步</span> / 2 · 填写资料
+              </p>
             </div>
 
             {error && (
@@ -429,18 +374,29 @@ export default function Register() {
 
             <div className="space-y-1.5">
               <label className="text-xs text-ink-3">确认密码</label>
-              <input
-                className="input"
-                type={showPassword ? 'text' : 'password'}
-                placeholder="再输一遍上面的密码"
-                value={form.confirmPassword}
-                onChange={(e) => set('confirmPassword', e.target.value)}
-                onBlur={() => markTouched('confirmPassword')}
-                required
-                minLength={8}
-                maxLength={72}
-                autoComplete="new-password"
-              />
+              <div className="relative">
+                <input
+                  className="input pr-10"
+                  type={showConfirmPassword ? 'text' : 'password'}
+                  placeholder="再输一遍上面的密码"
+                  value={form.confirmPassword}
+                  onChange={(e) => set('confirmPassword', e.target.value)}
+                  onBlur={() => markTouched('confirmPassword')}
+                  required
+                  minLength={8}
+                  maxLength={72}
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPassword((v) => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-ink-4 hover:text-ink-1 hover:bg-bg-3 transition-colors"
+                  aria-label={showConfirmPassword ? '隐藏密码' : '显示密码'}
+                  tabIndex={-1}
+                >
+                  {showConfirmPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
               {touched.confirmPassword && form.confirmPassword && !confirmOk ? (
                 <div className="text-[11px] text-accent-red">两次输入的密码不一致</div>
               ) : confirmOk ? (
@@ -452,9 +408,9 @@ export default function Register() {
               )}
             </div>
 
-            <button type="submit" disabled={!canSubmit} className="btn-primary w-full">
+            <button type="submit" disabled={!formStepOk || loading} className="btn-primary w-full">
               {loading && <Loader2 size={16} className="animate-spin" />}
-              {loading ? '注册中…' : `注册账号 ${pickedNo}`}
+              {loading ? '正在抽号…' : '下一步：选择账号'}
             </button>
 
             <p className="text-sm text-center text-ink-3">
@@ -464,6 +420,93 @@ export default function Register() {
               </Link>
             </p>
           </form>
+        ) : (
+          // ===== Step 2: pick a number =====
+          <div className="card p-7 anim-fade shadow-pop space-y-5">
+            <div className="text-center">
+              <h1 className="text-xl font-semibold flex items-center justify-center gap-2">
+                <Dices size={20} className="text-brand-300" /> 挑一个属于你的账号
+              </h1>
+              <p className="text-xs text-ink-3 mt-1">
+                <span className="text-brand-300 font-medium">第 2 步</span> / 2 · 选好后即创建
+              </p>
+            </div>
+
+            {error && (
+              <div className="text-sm text-accent-red bg-accent-red/10 border border-accent-red/40 rounded-lg px-3 py-2">
+                {error}
+              </div>
+            )}
+            {drawError && (
+              <div className="text-sm text-accent-red bg-accent-red/10 border border-accent-red/40 rounded-lg px-3 py-2">
+                {drawError}
+              </div>
+            )}
+
+            {drawing && numbers.length === 0 ? (
+              <div className="py-10 flex items-center justify-center gap-2 text-ink-3">
+                <Loader2 size={16} className="animate-spin" /> 正在摇号…
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2.5">
+                {numbers.map((n) => {
+                  const active = pickedNo === n;
+                  return (
+                    <button
+                      key={n}
+                      onClick={() => setPickedNo(n)}
+                      disabled={drawing}
+                      className={`relative py-3 rounded-lg border font-mono text-base tracking-wider transition-all ${
+                        active
+                          ? 'bg-brand-500 border-brand-500 text-white shadow-md scale-[1.02]'
+                          : 'bg-bg-2 border-bg-3 text-ink-2 hover:border-brand-400 hover:bg-bg-3'
+                      }`}
+                    >
+                      {n}
+                      {active && (
+                        <Check size={14} className="absolute top-1.5 right-1.5" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <button
+              onClick={doRefresh}
+              disabled={drawing || refreshesLeft <= 0}
+              className="btn-secondary text-sm w-full"
+              title={refreshesLeft <= 0 ? '刷新次数已用完，请从当前 10 个中选' : ''}
+            >
+              {drawing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              {refreshesLeft > 0 ? `换一批（还可换 ${refreshesLeft} 次）` : '换一批已用完'}
+            </button>
+
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setStep('form')}
+                disabled={loading}
+                className="btn-ghost text-sm flex-1"
+              >
+                ← 返回修改资料
+              </button>
+              <button
+                type="button"
+                onClick={confirmRegister}
+                disabled={!canSubmit}
+                className="btn-primary text-sm flex-[1.4]"
+              >
+                {loading && <Loader2 size={14} className="animate-spin" />}
+                {loading ? '创建中…' : pickedNo ? `确认创建 ${pickedNo}` : '请先选一个号'}
+              </button>
+            </div>
+
+            <div className="text-[11px] text-ink-4 leading-relaxed border-t border-bg-3 pt-3">
+              · 号码 10 分钟内有效，超时需重新抽号<br />
+              · 部分靓号已被保留 · 后续可能开放
+            </div>
+          </div>
         )}
 
         <p className="text-center text-xs text-ink-4 mt-6">© 东方信息 · 东风快信</p>

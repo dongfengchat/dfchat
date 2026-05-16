@@ -599,12 +599,12 @@ func (h *Handler) register(c *gin.Context) {
 
 	var u userInsertResult
 	err = tx.QueryRow(ctx, `
-		INSERT INTO users (username, email, password_hash, nickname, account_no)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO users (username, email, password_hash, nickname, account_no, registered_from_ip)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, account_no, username, email, nickname,
 		          COALESCE(avatar_url, ''), COALESCE(bio, ''),
 		          status, email_verified, is_admin, created_at`,
-		req.Username, email, string(hash), nickname, chosenNo,
+		req.Username, email, string(hash), nickname, chosenNo, c.ClientIP(),
 	).Scan(&u.ID, &u.AccountNo, &u.Username, &u.Email, &u.Nickname,
 		&u.AvatarURL, &u.Bio, &u.Status, &u.EmailVerified, &u.IsAdmin, &u.CreatedAt)
 	if err != nil {

@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   CircleOff,
   FileText,
+  Hash,
   MessageSquare,
   RadioTower,
   Search,
@@ -16,6 +17,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import {
+  adminAccountPoolStats,
   adminBanLiveRoom,
   adminDeleteLiveRoom,
   adminForceEndLive,
@@ -24,6 +26,7 @@ import {
   adminSetUserStatus,
   adminStats,
   type AdminLiveRoom,
+  type AdminSegmentStat,
   type AdminStats,
   type AdminUser,
 } from '@/api/client';
@@ -39,7 +42,7 @@ function statusBadge(n: number) {
   return <span className="text-accent-red text-xs font-medium">已删除</span>;
 }
 
-type AdminTab = 'users' | 'live';
+type AdminTab = 'users' | 'live' | 'pool';
 
 export default function Admin() {
   const navigate = useNavigate();
@@ -138,10 +141,19 @@ export default function Admin() {
               >
                 <RadioTower size={14} className="inline mr-1.5 -mt-0.5" /> 直播管理
               </button>
+              <button
+                onClick={() => setTab('pool')}
+                className={`px-4 py-2 text-sm rounded-t -mb-px transition-colors ${
+                  tab === 'pool' ? 'bg-bg-3 text-ink-1 border-b-2 border-brand-500' : 'text-ink-3 hover:text-ink-1'
+                }`}
+              >
+                <Hash size={14} className="inline mr-1.5 -mt-0.5" /> 号码池
+              </button>
             </div>
           </div>
 
           {tab === 'live' && <LiveAdminPanel />}
+          {tab === 'pool' && <PoolPanel />}
 
           {tab === 'users' && <section className="px-6 pb-6 pt-4">
             <div className="flex items-center gap-3 mb-3">
@@ -152,75 +164,89 @@ export default function Admin() {
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && refreshUsers(search || undefined)}
-                  placeholder="搜索 用户名/邮箱/昵称（回车）"
+                  placeholder="搜索 账号/用户名/邮箱/昵称（回车）"
                   className="input pl-9 py-2 text-sm"
                 />
               </div>
             </div>
 
-            <div className="card overflow-hidden">
-              <table className="w-full text-sm">
+            <div className="card overflow-x-auto">
+              <table className="w-full text-sm min-w-[1100px]">
                 <thead className="bg-bg-3 text-ink-3">
                   <tr>
-                    <th className="text-left px-4 py-2.5 font-medium">用户</th>
-                    <th className="text-left px-4 py-2.5 font-medium">邮箱</th>
-                    <th className="text-left px-4 py-2.5 font-medium">状态</th>
-                    <th className="text-left px-4 py-2.5 font-medium">角色</th>
-                    <th className="text-left px-4 py-2.5 font-medium">最近登录</th>
-                    <th className="text-right px-4 py-2.5 font-medium">操作</th>
+                    <th className="text-left px-3 py-2.5 font-medium">账号</th>
+                    <th className="text-left px-3 py-2.5 font-medium">用户</th>
+                    <th className="text-left px-3 py-2.5 font-medium">邮箱</th>
+                    <th className="text-left px-3 py-2.5 font-medium">注册 IP</th>
+                    <th className="text-left px-3 py-2.5 font-medium">最近登录 IP</th>
+                    <th className="text-left px-3 py-2.5 font-medium">状态</th>
+                    <th className="text-left px-3 py-2.5 font-medium">注册时间</th>
+                    <th className="text-right px-3 py-2.5 font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {loading
                     ? Array.from({ length: 4 }).map((_, i) => (
                         <tr key={i} className="border-t border-bg-5/30">
-                          <td className="px-4 py-3"><Skeleton className="h-4 w-40" /></td>
-                          <td className="px-4 py-3"><Skeleton className="h-4 w-48" /></td>
-                          <td className="px-4 py-3"><Skeleton className="h-4 w-12" /></td>
-                          <td className="px-4 py-3"><Skeleton className="h-4 w-12" /></td>
-                          <td className="px-4 py-3"><Skeleton className="h-4 w-28" /></td>
-                          <td className="px-4 py-3 text-right"><Skeleton className="h-8 w-16 inline-block" /></td>
+                          <td className="px-3 py-3"><Skeleton className="h-4 w-16" /></td>
+                          <td className="px-3 py-3"><Skeleton className="h-4 w-32" /></td>
+                          <td className="px-3 py-3"><Skeleton className="h-4 w-40" /></td>
+                          <td className="px-3 py-3"><Skeleton className="h-4 w-24" /></td>
+                          <td className="px-3 py-3"><Skeleton className="h-4 w-24" /></td>
+                          <td className="px-3 py-3"><Skeleton className="h-4 w-12" /></td>
+                          <td className="px-3 py-3"><Skeleton className="h-4 w-28" /></td>
+                          <td className="px-3 py-3 text-right"><Skeleton className="h-8 w-16 inline-block" /></td>
                         </tr>
                       ))
                     : users.map((u) => (
                         <tr key={u.id} className="border-t border-bg-5/30 hover:bg-bg-3/50">
-                          <td className="px-4 py-2.5">
-                            <div className="flex items-center gap-3">
-                              <Avatar name={u.nickname || u.username} size={32} />
+                          <td className="px-3 py-2.5">
+                            <span className="font-mono text-sm text-ink-1">{u.accountNo}</span>
+                            {u.isAdmin && (
+                              <span className="ml-1.5 inline-flex items-center text-accent-amber" title="管理员">
+                                <ShieldCheck size={11} />
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2.5">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Avatar name={u.nickname || u.username} size={28} />
                               <div className="min-w-0">
-                                <div className="font-medium text-ink-1 truncate">{u.nickname}</div>
-                                <div className="text-xs text-ink-3 truncate">@{u.username} · #{u.id}</div>
+                                <div className="font-medium text-ink-1 truncate text-xs">{u.nickname}</div>
+                                <div className="text-[11px] text-ink-3 truncate">@{u.username}</div>
                               </div>
                             </div>
                           </td>
-                          <td className="px-4 py-2.5 text-ink-3 text-xs">{u.email}</td>
-                          <td className="px-4 py-2.5">{statusBadge(u.status)}</td>
-                          <td className="px-4 py-2.5">
-                            {u.isAdmin ? (
-                              <span className="inline-flex items-center gap-1 text-accent-amber text-xs">
-                                <ShieldCheck size={12} /> 管理员
-                              </span>
-                            ) : (
-                              <span className="text-ink-4 text-xs">普通</span>
-                            )}
+                          <td className="px-3 py-2.5 text-ink-3 text-xs">
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate max-w-[180px]" title={u.email}>{u.email}</span>
+                              {u.emailVerified ? (
+                                <CheckCircle2 size={12} className="text-accent-green shrink-0" />
+                              ) : (
+                                <CircleOff size={12} className="text-ink-4 shrink-0" />
+                              )}
+                            </div>
                           </td>
-                          <td className="px-4 py-2.5 text-ink-3 text-xs">
-                            {u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : '—'}
+                          <td className="px-3 py-2.5 text-ink-3 text-xs font-mono">{u.registeredFromIp || '—'}</td>
+                          <td className="px-3 py-2.5 text-ink-3 text-xs font-mono">{u.lastLoginIp || '—'}</td>
+                          <td className="px-3 py-2.5">{statusBadge(u.status)}</td>
+                          <td className="px-3 py-2.5 text-ink-3 text-xs">
+                            {new Date(u.createdAt).toLocaleString('zh-CN', { hour12: false })}
                           </td>
-                          <td className="px-4 py-2.5 text-right">
+                          <td className="px-3 py-2.5 text-right">
                             {u.status === 0 ? (
                               <button
                                 onClick={() => setStatus(u, 1)}
                                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-accent-amber/15 text-accent-amber hover:bg-accent-amber/25 text-xs"
                               >
-                                <Ban size={12} /> 禁用
+                                <Ban size={12} /> 封号
                               </button>
                             ) : (
                               <button
                                 onClick={() => setStatus(u, 0)}
                                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25 text-xs"
                               >
-                                <CheckCircle2 size={12} /> 启用
+                                <CheckCircle2 size={12} /> 解封
                               </button>
                             )}
                           </td>
@@ -405,6 +431,103 @@ function StatCard({
       <div className="text-2xl font-semibold mt-2">
         {value == null ? <Skeleton className="h-7 w-16" /> : value.toLocaleString()}
       </div>
+    </div>
+  );
+}
+
+// PoolPanel shows every account-number segment with a fill bar:
+// claimed (occupied) + reserved (in-flight draws) + locked (premium,
+// admin-only) + free. Lets admins see when the next segment is about
+// to open and spot pool-drain anomalies (e.g. reserved >> normal
+// pattern = bot draws sitting on stock).
+function PoolPanel() {
+  const [segments, setSegments] = useState<AdminSegmentStat[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const s = await adminAccountPoolStats();
+        if (!cancelled) setSegments(s);
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message ?? '加载失败');
+      }
+    };
+    void load();
+    // Auto-refresh every 30s so pool-drain shows up live.
+    const t = setInterval(() => void load(), 30000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  if (error) return <div className="p-6 text-accent-red">{error}</div>;
+
+  return (
+    <section className="px-6 pb-6 pt-4 space-y-4">
+      <div className="flex items-center gap-3">
+        <h2 className="text-base font-semibold">账号号码池</h2>
+        <span className="text-xs text-ink-4">每 30s 自动刷新</span>
+      </div>
+
+      {!segments ? (
+        <div className="card p-6"><Skeleton className="h-32 w-full" /></div>
+      ) : segments.length === 0 ? (
+        <div className="card p-6 text-ink-3 text-sm">还没有开启任何号段</div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {segments.map((s) => {
+            const pctClaimed = s.total > 0 ? (s.claimed / s.total) * 100 : 0;
+            const pctReserved = s.total > 0 ? (s.reserved / s.total) * 100 : 0;
+            const pctLocked = s.total > 0 ? (s.locked / s.total) * 100 : 0;
+            // Warn when free dips low — next-segment trigger is at 200 free.
+            const lowFree = s.free < 500;
+            return (
+              <div key={s.segmentNo} className="card p-5 space-y-3">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="text-xs text-ink-3">段 {s.segmentNo} · {s.state}</div>
+                    <div className="font-mono text-base">
+                      {s.rangeStart.toLocaleString()} – {s.rangeEnd.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-xs text-ink-4">开放于</div>
+                    <div className="text-xs text-ink-3">{new Date(s.openedAt).toLocaleDateString()}</div>
+                  </div>
+                </div>
+
+                {/* Composite fill bar */}
+                <div className="h-3 rounded-full overflow-hidden bg-bg-3 flex">
+                  <div className="bg-accent-green" style={{ width: `${pctClaimed}%` }} title={`已注册 ${s.claimed}`} />
+                  <div className="bg-accent-amber" style={{ width: `${pctReserved}%` }} title={`在摇 ${s.reserved}`} />
+                  <div className="bg-brand-500" style={{ width: `${pctLocked}%` }} title={`靓号锁定 ${s.locked}`} />
+                </div>
+
+                <div className="grid grid-cols-4 gap-2 text-xs">
+                  <PoolStat label="已注册" value={s.claimed} color="text-accent-green" />
+                  <PoolStat label="在摇" value={s.reserved} color="text-accent-amber" />
+                  <PoolStat label="靓号" value={s.locked} color="text-brand-300" />
+                  <PoolStat label="可用" value={s.free} color={lowFree ? 'text-accent-red' : 'text-ink-1'} />
+                </div>
+                {lowFree && (
+                  <div className="text-[11px] text-accent-red">
+                    可用号 &lt; 500，下次摇号会自动开下一段
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PoolStat({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-ink-4">{label}</span>
+      <span className={`font-mono font-semibold ${color}`}>{value.toLocaleString()}</span>
     </div>
   );
 }

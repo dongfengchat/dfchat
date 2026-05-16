@@ -1,46 +1,85 @@
 import { useEffect, useState } from 'react';
-import { Download, X } from 'lucide-react';
+import { Download, Sparkles, X } from 'lucide-react';
 
 /**
- * Lightweight update notifier. The main process polls a JSON manifest on
- * dfchat.chat once at startup and every 6h; when it spots a newer version
- * it sends `update:available` and we render this banner.
+ * Prominent top-of-window update banner. The main process polls
+ * dfchat.chat/updates/latest.json at startup and every 6 h; when it
+ * finds a newer version it sends `update:available` and we mount this
+ * banner above the rest of the UI.
  *
- * "立即下载" hands off to the system browser — we can't auto-swap the app
- * without an Apple Developer ID code signature. Dismiss is per-session.
+ * Design notes:
+ *   - Lives at the very top of the viewport (fixed) so the user sees
+ *     it the moment the app paints. The old version was a bottom-toast,
+ *     which testers consistently overlooked.
+ *   - Shows the release notes (truncated) so users know what's new and
+ *     can make an informed "now vs later" call.
+ *   - Dismissal is per-version in localStorage: dismiss v0.1.23 once,
+ *     don't see it again, but v0.1.24 still notifies. Stops the "I
+ *     dismissed it last week, never saw v0.1.30" footgun.
+ *   - "立即下载" opens the native browser to the per-platform installer.
+ *     Without an Apple Developer ID + signed Squirrel feed we can't
+ *     auto-swap the app; this is the best UX until we can.
  */
+const DISMISS_KEY = 'dfchat:dismissed-update';
+
 export default function UpdateBanner() {
-  const [info, setInfo] = useState<{ version: string; downloadUrl?: string } | null>(null);
+  const [info, setInfo] = useState<{ version: string; downloadUrl?: string; notes?: string } | null>(null);
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     if (!window.electronAPI) return;
     const off = window.electronAPI.onUpdateAvailable((i) => {
-      setInfo({ version: i.version, downloadUrl: i.downloadUrl });
-      setDismissed(false);
+      // Was this exact version already dismissed?
+      const skip = localStorage.getItem(DISMISS_KEY) === i.version;
+      setInfo({ version: i.version, downloadUrl: i.downloadUrl, notes: i.notes });
+      setDismissed(skip);
     });
     return () => off();
   }, []);
 
   if (!info || dismissed) return null;
 
+  function onDismiss() {
+    localStorage.setItem(DISMISS_KEY, info!.version);
+    setDismissed(true);
+  }
+
+  function onDownload() {
+    window.electronAPI?.installUpdate({ downloadUrl: info!.downloadUrl });
+  }
+
   return (
-    <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 anim-slide">
-      <div className="card shadow-pop px-4 py-2.5 flex items-center gap-3 max-w-md">
-        <Download size={18} className="text-brand-300 shrink-0" />
-        <div className="text-sm text-ink-1 min-w-0">
-          新版本 <span className="text-brand-300 font-medium">v{info.version}</span> 已发布
+    <div className="fixed top-0 left-0 right-0 z-[60] anim-slide">
+      <div
+        className="px-4 py-2.5 flex items-center gap-3 shadow-md border-b border-brand-500/50"
+        style={{
+          background: 'linear-gradient(90deg, rgba(72,105,247,0.18) 0%, rgba(72,105,247,0.10) 100%)',
+        }}
+      >
+        <div className="flex items-center gap-2 shrink-0">
+          <Sparkles size={16} className="text-brand-300" />
+          <span className="text-sm font-medium text-ink-1">
+            新版本 <span className="font-mono text-brand-300">v{info.version}</span> 已发布
+          </span>
         </div>
+        {info.notes ? (
+          <div className="text-xs text-ink-3 min-w-0 truncate flex-1" title={info.notes}>
+            · {info.notes}
+          </div>
+        ) : (
+          <div className="flex-1" />
+        )}
         <button
-          onClick={() => window.electronAPI?.installUpdate({ downloadUrl: info.downloadUrl })}
-          className="btn-primary shrink-0 py-1.5"
+          onClick={onDownload}
+          className="btn-primary py-1 px-3 text-xs shrink-0"
         >
-          立即下载
+          <Download size={12} /> 立即下载
         </button>
         <button
-          onClick={() => setDismissed(true)}
-          className="btn-icon w-7 h-7"
-          aria-label="稍后"
+          onClick={onDismiss}
+          className="btn-icon w-7 h-7 shrink-0"
+          aria-label="本版本不再提示"
+          title="本版本不再提示（下一版仍会通知）"
         >
           <X size={14} />
         </button>

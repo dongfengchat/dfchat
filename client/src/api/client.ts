@@ -678,13 +678,30 @@ export interface AdminStats {
 
 export interface AdminUser {
   id: string;
+  accountNo: string;
   username: string;
   email: string;
   nickname: string;
   status: number;
   isAdmin: boolean;
+  emailVerified: boolean;
   lastLoginAt?: string;
+  lastLoginIp?: string;
+  registeredFromIp?: string;
   createdAt: string;
+}
+
+export interface AdminSegmentStat {
+  segmentNo: number;
+  rangeStart: number;
+  rangeEnd: number;
+  state: string;
+  total: number;
+  claimed: number;
+  locked: number;
+  reserved: number;
+  free: number;
+  openedAt: string;
 }
 
 export async function adminStats(): Promise<AdminStats> {
@@ -696,7 +713,16 @@ export async function adminStats(): Promise<AdminStats> {
   }
 }
 
-export async function adminListUsers(opts?: { search?: string; limit?: number; offset?: number }): Promise<AdminUser[]> {
+export async function adminAccountPoolStats(): Promise<AdminSegmentStat[]> {
+  try {
+    const res = await api.get<{ segments: AdminSegmentStat[] }>('/api/v1/admin/account-pool');
+    return res.data.segments ?? [];
+  } catch (e) {
+    throw unwrapError(e);
+  }
+}
+
+export async function adminListUsers(opts?: { search?: string; limit?: number; offset?: number; ip?: string }): Promise<AdminUser[]> {
   try {
     const res = await api.get<{ users: AdminUser[] }>('/api/v1/admin/users', { params: opts });
     return res.data.users ?? [];

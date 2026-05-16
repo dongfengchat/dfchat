@@ -720,6 +720,40 @@
   .signup-card .msg { font-size: 13px; margin-top: 14px; padding: 10px 12px; border-radius: 10px; display: none; }
   .signup-card .msg.error { display: block; color: #ed4245; background: rgba(237,66,69,0.10); border: 1px solid rgba(237,66,69,0.35); }
   .signup-card .msg.success { display: block; color: var(--accent-green); background: rgba(59,165,92,0.10); border: 1px solid rgba(59,165,92,0.40); }
+  /* Password eye toggle: a button overlaid on the input's right edge. */
+  .signup-card .pw-wrap { position: relative; }
+  .signup-card .pw-wrap input { padding-right: 40px; }
+  .signup-card .pw-eye {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    width: 30px; height: 30px;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: none; cursor: pointer;
+    color: var(--ink-4); border-radius: 6px;
+    transition: color .15s, background .15s;
+  }
+  .signup-card .pw-eye:hover { color: var(--ink-1); background: var(--bg-3); }
+  /* Step indicator above the form */
+  .step-indicator {
+    display: flex; align-items: center; justify-content: center;
+    gap: 6px; font-size: 12px; color: var(--ink-3);
+    margin-bottom: 12px;
+  }
+  .step-indicator .dot {
+    width: 18px; height: 18px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--bg-3); color: var(--ink-3); font-size: 11px;
+    border: 1px solid rgba(58,65,80,0.6);
+  }
+  .step-indicator .dot.active {
+    background: var(--brand-500); color: #fff; border-color: var(--brand-500);
+  }
+  .step-indicator .dot.done {
+    background: var(--accent-green); color: #fff; border-color: var(--accent-green);
+  }
+  .step-indicator .bar {
+    flex: 0 0 30px; height: 1px; background: rgba(58,65,80,0.6);
+  }
+  .step-indicator .bar.done { background: var(--accent-green); }
   .signup-card .hint { font-size: 11px; color: var(--ink-4); margin-top: 4px; }
   .signup-card .hint.bad { color: #ed4245; }
   .signup-card .hint.ok { color: var(--accent-green); }
@@ -1280,36 +1314,29 @@
   <div class="container">
     <div class="signup-card">
       <h2 class="reveal">免费注册</h2>
-      <p class="muted">先挑一个号码 · 再填资料 · 不需要手机号</p>
+      <p class="muted">填写资料 · 选择账号 · 即可使用 · 不需要手机号</p>
       <form id="reg-form" autocomplete="off">
         <!--
           Honeypot — hidden field that real users never see / fill.
           Naive bots iterate every named input and fill them all. The
           server silently 200s when this is non-empty so the bot thinks
           it succeeded; no real account is created.
-          aria-hidden + tabindex=-1 so screen readers + keyboard users
-          skip it; position off-screen so layout isn't affected.
         -->
         <input type="text" name="website" tabindex="-1" aria-hidden="true"
                autocomplete="off"
                style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;" />
 
-        <!-- Step 1: pick a number -->
-        <div class="field">
-          <label>🎲 选择你的账号 <span class="muted" id="picker-status">正在摇号…</span></label>
-          <div class="num-grid" id="num-grid">
-            <!-- 10 cells populated by JS -->
-          </div>
-          <div class="picker-row">
-            <button type="button" class="refresh-btn" id="refresh-btn" disabled>换一批</button>
-          </div>
-          <div class="picker-note">
-            选中后才能填写注册资料 · 号码 10 分钟内有效
-          </div>
+        <!-- Step indicator -->
+        <div class="step-indicator" id="step-indicator">
+          <span class="dot active" id="step-dot-1">1</span>
+          <span class="muted">填资料</span>
+          <span class="bar" id="step-bar"></span>
+          <span class="dot" id="step-dot-2">2</span>
+          <span class="muted">选账号</span>
         </div>
 
-        <!-- Step 2: form (locked until a number is picked) -->
-        <div class="form-fields" id="form-fields" data-locked="1">
+        <!-- ========== Step 1: form (visible first) ========== -->
+        <div id="step-form">
           <div class="field">
             <label>用户名 <span class="muted">（5-32 位字母数字下划线）</span></label>
             <input name="username" maxlength="32" required pattern="[A-Za-z0-9_]{5,32}" placeholder="alice123" />
@@ -1325,16 +1352,48 @@
           </div>
           <div class="field">
             <label>密码 <span class="muted">（8–72 位，需混合字母数字或符号）</span></label>
-            <input name="password" type="password" minlength="8" maxlength="72" required placeholder="••••••••" />
+            <div class="pw-wrap">
+              <input name="password" type="password" minlength="8" maxlength="72" required placeholder="••••••••" />
+              <button type="button" class="pw-eye" data-target="password" aria-label="显示密码">
+                <!-- eye icon (default) -->
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
             <div class="hint" id="pw-hint">至少 8 位，且不只是字母或数字</div>
           </div>
           <div class="field">
             <label>确认密码</label>
-            <input name="confirmPassword" type="password" minlength="8" maxlength="72" required placeholder="再输一遍" />
+            <div class="pw-wrap">
+              <input name="confirmPassword" type="password" minlength="8" maxlength="72" required placeholder="再输一遍" />
+              <button type="button" class="pw-eye" data-target="confirmPassword" aria-label="显示密码">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
             <div class="hint" id="confirm-hint">为防止手误，需要再输一遍</div>
           </div>
-          <button type="submit" class="btn btn-primary" id="reg-submit" disabled>请先选择账号</button>
+          <button type="button" class="btn btn-primary" id="next-btn">下一步：选择账号</button>
         </div>
+
+        <!-- ========== Step 2: pick a number (hidden until step 1 passes) ========== -->
+        <div id="step-pick" style="display: none;">
+          <div class="field">
+            <label>🎲 挑一个属于你的账号 <span class="muted" id="picker-status">正在摇号…</span></label>
+            <div class="num-grid" id="num-grid">
+              <!-- 10 cells populated by JS -->
+            </div>
+            <div class="picker-row">
+              <button type="button" class="refresh-btn" id="refresh-btn" disabled>换一批</button>
+            </div>
+            <div class="picker-note">
+              号码 10 分钟内有效 · 部分靓号已被保留，后续可能开放
+            </div>
+          </div>
+          <div class="picker-row">
+            <button type="button" class="refresh-btn" id="back-btn">← 返回修改资料</button>
+            <button type="submit" class="btn btn-primary" id="reg-submit" disabled style="flex: 1.4;">请先选一个号</button>
+          </div>
+        </div>
+
         <div class="msg" id="reg-msg"></div>
       </form>
     </div>
@@ -1398,15 +1457,22 @@
   })();
 
   // ============================================================
-  // Inline register: account-number picker + form
+  // Inline register: form first, then account-number picker
   // ============================================================
   const form        = document.getElementById('reg-form');
   const msg         = document.getElementById('reg-msg');
+  const stepForm    = document.getElementById('step-form');
+  const stepPick    = document.getElementById('step-pick');
+  const stepDot1    = document.getElementById('step-dot-1');
+  const stepDot2    = document.getElementById('step-dot-2');
+  const stepBar     = document.getElementById('step-bar');
+  const nextBtn     = document.getElementById('next-btn');
+  const backBtn     = document.getElementById('back-btn');
   const grid        = document.getElementById('num-grid');
   const refreshBtn  = document.getElementById('refresh-btn');
   const pickerStat  = document.getElementById('picker-status');
-  const formFields  = document.getElementById('form-fields');
   const submitBtn   = document.getElementById('reg-submit');
+  const usernameIn  = form.querySelector('input[name="username"]');
   const pwInput     = form.querySelector('input[name="password"]');
   const confirmIn   = form.querySelector('input[name="confirmPassword"]');
   const emailInput  = form.querySelector('input[name="email"]');
@@ -1434,12 +1500,43 @@
         pickedNo = n;
         Array.from(grid.children).forEach((c) => c.classList.remove('active'));
         cell.classList.add('active');
-        formFields.dataset.locked = '0';
         updateSubmitButton();
       });
       grid.appendChild(cell);
     });
   }
+
+  function showStep(s) {
+    if (s === 'form') {
+      stepForm.style.display = '';
+      stepPick.style.display = 'none';
+      stepDot1.className = 'dot active';
+      stepDot2.className = 'dot';
+      stepBar.className = 'bar';
+    } else {
+      stepForm.style.display = 'none';
+      stepPick.style.display = '';
+      stepDot1.className = 'dot done';
+      stepDot2.className = 'dot active';
+      stepBar.className = 'bar done';
+    }
+  }
+
+  // Password eye toggles — one per .pw-eye button.
+  document.querySelectorAll('.pw-eye').forEach((btn) => {
+    const target = btn.dataset.target;
+    const input = form.querySelector('input[name="' + target + '"]');
+    let visible = false;
+    btn.addEventListener('click', () => {
+      visible = !visible;
+      input.type = visible ? 'text' : 'password';
+      btn.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码');
+      // Swap the SVG icon: open eye ↔ closed (eye-off) eye.
+      btn.innerHTML = visible
+        ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+        : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+    });
+  });
 
   function setRefreshButton(label, disabled) {
     refreshBtn.textContent = label;
@@ -1495,6 +1592,49 @@
 
   refreshBtn.addEventListener('click', doRefresh);
 
+  // "下一步" — clicked on the form step. Validate locally, then fire
+  // the first draw and reveal the picker. Stays on step 1 if anything
+  // fails so the user can fix it before burning a draw.
+  nextBtn.addEventListener('click', async () => {
+    msg.className = 'msg'; msg.textContent = '';
+    // Trigger native validation messages (required / minlength / pattern).
+    if (!form.checkValidity()) {
+      // Reporting validity scrolls to the first invalid input and shows
+      // the browser-native popover.
+      form.reportValidity();
+      return;
+    }
+    const u = usernameIn.value.trim();
+    if (!/^[A-Za-z0-9_]{5,32}$/.test(u)) {
+      msg.className = 'msg error'; msg.textContent = '用户名须为 5-32 位字母 / 数字 / 下划线'; return;
+    }
+    if (!checkPwLive()) { msg.className = 'msg error'; msg.textContent = pwHint.textContent; return; }
+    if (!checkConfirmLive()) { msg.className = 'msg error'; msg.textContent = confirmHint.textContent; return; }
+    const domain = (emailInput.value.trim().split('@').pop() || '').toLowerCase();
+    if (DISPOSABLE.has(domain)) {
+      msg.className = 'msg error'; msg.textContent = '不接受一次性邮箱'; return;
+    }
+
+    // All local validation passed — kick off the draw and transition.
+    nextBtn.disabled = true;
+    nextBtn.textContent = '正在抽号…';
+    try {
+      await doDraw();
+      showStep('pick');
+    } finally {
+      nextBtn.disabled = false;
+      nextBtn.textContent = '下一步：选择账号';
+    }
+  });
+
+  // "返回修改资料" — go back to step 1. The picker state (numbers,
+  // selectionToken, refreshesLeft) stays so the user can return without
+  // losing their already-drawn options.
+  backBtn.addEventListener('click', () => {
+    msg.className = 'msg'; msg.textContent = '';
+    showStep('form');
+  });
+
   // Live password / confirm-password hints
   function checkPwLive() {
     const pw = pwInput.value;
@@ -1524,11 +1664,11 @@
   function updateSubmitButton() {
     if (pickedNo === null) {
       submitBtn.disabled = true;
-      submitBtn.textContent = '请先选择账号';
+      submitBtn.textContent = '请先选一个号';
       return;
     }
     submitBtn.disabled = false;
-    submitBtn.textContent = '注册账号 ' + pickedNo;
+    submitBtn.textContent = '✓ 确认创建 ' + pickedNo;
   }
   pwInput.addEventListener('input', () => { checkPwLive(); checkConfirmLive(); });
   confirmIn.addEventListener('input', checkConfirmLive);
@@ -1573,12 +1713,19 @@
       if (!res.ok) {
         msg.classList.add('error');
         msg.textContent = body.message || ('注册失败 HTTP ' + res.status);
-        // If the chosen number was snatched mid-flight, re-draw.
+        // Number-related races: just re-draw, stay on pick step.
         if (body.code === 10094 || body.code === 10091 || body.code === 10095) {
           await doDraw();
+          showStep('pick');
+        } else if (body.code === 10014 || body.code === 10015 || body.code === 10011 || body.code === 10012) {
+          // Validation hit at server (username/email taken or bad
+          // format): kick user back to the form to fix.
+          showStep('form');
+          submitBtn.disabled = false;
+          submitBtn.textContent = '✓ 确认创建 ' + pickedNo;
         } else {
           submitBtn.disabled = false;
-          submitBtn.textContent = '注册账号 ' + pickedNo;
+          submitBtn.textContent = '✓ 确认创建 ' + pickedNo;
         }
         return;
       }
@@ -1592,25 +1739,13 @@
       msg.classList.add('error');
       msg.textContent = '网络错误，请检查连接：' + (err.message || err);
       submitBtn.disabled = false;
-      submitBtn.textContent = '注册账号 ' + pickedNo;
+      submitBtn.textContent = '✓ 确认创建 ' + pickedNo;
     }
   });
 
-  // Kick off the first draw as soon as the user scrolls within ~600px of
-  // the signup card — saves draw resources on visitors who never look.
-  let drawn = false;
-  function maybeDraw() {
-    if (drawn) return;
-    const rect = document.getElementById('signup').getBoundingClientRect();
-    if (rect.top < window.innerHeight + 600) {
-      drawn = true;
-      doDraw();
-      window.removeEventListener('scroll', maybeDraw);
-    }
-  }
-  window.addEventListener('scroll', maybeDraw, { passive: true });
-  // If signup is already visible on load, fire immediately.
-  maybeDraw();
+  // No auto-draw on scroll — wait until the user clicks "下一步". Form
+  // is now the first thing they see, and we shouldn't burn a per-IP
+  // draw quota on visitors who never decide to register.
 </script>
 
 <!-- ============================================================
