@@ -159,6 +159,15 @@ services:
       TURN_SECRET: ${TURN_SECRET}
       TURN_HOST: ${TURN_HOST:-dfchat.chat}
       TURN_TLS_ENABLED: "true"
+      # Outbound SMTP for email verification + password reset.
+      # Empty SMTP_HOST → mailer logs to stdout instead of sending (dev mode).
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://dfchat.chat}
 
   nginx:
     image: nginx:1.27-alpine

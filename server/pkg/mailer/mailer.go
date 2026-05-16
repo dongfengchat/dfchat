@@ -50,14 +50,22 @@ func (m *Mailer) Send(to, subject, body string) error {
 	if from == "" {
 		from = m.cfg.User
 	}
+	// "DFCHAT <a@b.com>" → envelope wants just "a@b.com"; the full string
+	// stays in the From: header. Gmail rejects MAIL FROM:<DFCHAT <a@b.com>>
+	// with 555 5.5.2.
+	envelopeFrom := extractAddr(from)
 
 	msg := buildMessage(from, to, subject, body)
 
 	if m.cfg.UseTLS {
-		return sendImplicitTLS(addr, m.cfg.Host, m.cfg.User, m.cfg.Password, from, to, msg, m.log)
+		if err := sendImplicitTLS(addr, m.cfg.Host, m.cfg.User, m.cfg.Password, envelopeFrom, to, msg, m.log); err != nil {
+			m.log.Warn("smtp send failed (tls)", "to", to, "host", m.cfg.Host, "err", err.Error())
+			return err
+		}
+		return nil
 	}
 	auth := smtp.PlainAuth("", m.cfg.User, m.cfg.Password, m.cfg.Host)
-	if err := smtp.SendMail(addr, auth, from, []string{to}, msg); err != nil {
+	if err := smtp.SendMail(addr, auth, envelopeFrom, []string{to}, msg); err != nil {
 		m.log.Warn("smtp send failed", "to", to, "err", err.Error())
 		return err
 	}
@@ -133,6 +141,18 @@ func mimeBEncode(s string) string {
 		}
 	}
 	return s
+}
+
+// extractAddr pulls the bare address out of a From string. Accepts both
+// "name <addr>" and plain "addr". Used for the SMTP envelope (MAIL FROM)
+// where display names are illegal.
+func extractAddr(s string) string {
+	if i := strings.LastIndex(s, "<"); i >= 0 {
+		if j := strings.LastIndex(s, ">"); j > i {
+			return s[i+1 : j]
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 func trunc(s string, n int) string {
