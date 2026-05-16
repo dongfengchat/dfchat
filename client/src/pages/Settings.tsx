@@ -3,10 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
   ArrowLeft,
+  CheckCircle2,
   Info,
   KeyRound,
   Loader2,
   LogOut,
+  Mail,
   Monitor,
   Save,
   Smartphone,
@@ -20,6 +22,7 @@ import {
   logoutServer,
   revokeOtherSessions,
   revokeSession,
+  sendVerificationEmail,
   updateMe,
   uploadBlob,
 } from '@/api/client';
@@ -206,6 +209,8 @@ function ProfileTab({ me, onSaved }: { me: ReturnType<typeof useUserStore.getSta
         <div className="text-[11px] text-ink-4">用户名注册后无法修改</div>
       </div>
 
+      <EmailRow email={me?.email ?? ''} verified={!!me?.emailVerified} onVerified={() => onSaved({ ...(me as NonNullable<typeof me>), emailVerified: true })} />
+
       <div className="space-y-1.5">
         <label className="text-xs text-ink-3">昵称</label>
         <input
@@ -240,6 +245,75 @@ function ProfileTab({ me, onSaved }: { me: ReturnType<typeof useUserStore.getSta
         </button>
       </div>
     </section>
+  );
+}
+
+// EmailRow shows the user's registered email + verification status. If
+// unverified, lets the user trigger the verification mail right here
+// (60s cooldown matches the server-side rate limit so we don't bounce
+// off a 429).
+function EmailRow({ email, verified, onVerified }: { email: string; verified: boolean; onVerified: () => void }) {
+  const [sending, setSending] = useState(false);
+  const [sentAt, setSentAt] = useState<number | null>(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!sentAt) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [sentAt]);
+
+  const cooldownLeft = sentAt ? Math.max(0, 60 - Math.floor((now - sentAt) / 1000)) : 0;
+
+  async function send() {
+    setSending(true);
+    try {
+      const res = await sendVerificationEmail();
+      if (res.alreadyVerified) {
+        toast('邮箱已验证', 'success');
+        onVerified();
+        return;
+      }
+      setSentAt(Date.now());
+      if (res.devLink) {
+        toast('开发模式：链接已在后端日志', 'info');
+      } else {
+        toast(`验证邮件已发送至 ${email}，去收件箱查收（也看一下垃圾箱）`, 'success');
+      }
+    } catch (e: any) {
+      toast(e.message ?? '发送失败', 'error');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <label className="text-xs text-ink-3">邮箱</label>
+      <div className="flex items-center gap-2">
+        <input className="input opacity-60 flex-1" value={email} disabled />
+        {verified ? (
+          <span className="text-xs text-accent-green flex items-center gap-1 shrink-0">
+            <CheckCircle2 size={14} /> 已验证
+          </span>
+        ) : (
+          <button
+            onClick={send}
+            disabled={sending || cooldownLeft > 0}
+            className="btn-secondary text-xs py-1 shrink-0"
+            title="发送验证邮件到这个邮箱"
+          >
+            {sending ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />}
+            {sending ? '发送中…' : cooldownLeft > 0 ? `${cooldownLeft}s 后重发` : '发送验证邮件'}
+          </button>
+        )}
+      </div>
+      <div className="text-[11px] text-ink-4">
+        {verified
+          ? '忘记密码时会发送重置链接到这个邮箱'
+          : '验证后才能在忘记密码时收到重置邮件 · 修改邮箱功能尚未开放'}
+      </div>
+    </div>
   );
 }
 
