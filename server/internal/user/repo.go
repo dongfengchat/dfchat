@@ -48,8 +48,13 @@ type Credentials struct {
 }
 
 func (r *Repo) FindCredentialsByLogin(ctx context.Context, login string) (*Credentials, error) {
+	// Username is matched case-sensitively (it's stored exactly as the user
+	// typed at registration). Email is matched case-insensitively against
+	// the stored lower-cased copy — emails are RFC-defined case-insensitive
+	// on the local part, and we store them lower-cased on register so we
+	// can use a simple equality on the indexed column.
 	const q = `SELECT id, password_hash, status FROM users
-		WHERE (username = $1 OR email = $1) LIMIT 1`
+		WHERE username = $1 OR email = lower($1) LIMIT 1`
 	c := &Credentials{}
 	err := r.pool.QueryRow(ctx, q, login).Scan(&c.ID, &c.PasswordHash, &c.Status)
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -22,7 +23,21 @@ import (
 var (
 	usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`)
 	emailRe    = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+
+	// Reserved usernames — keep impostor accounts off well-known names.
+	// Matched case-insensitively against the requested username.
+	reservedUsernames = map[string]struct{}{
+		"admin": {}, "administrator": {}, "root": {}, "system": {},
+		"support": {}, "help": {}, "official": {}, "staff": {}, "moderator": {}, "mod": {},
+		"dfchat": {}, "noreply": {}, "no_reply": {}, "service": {}, "api": {},
+		"security": {}, "abuse": {}, "postmaster": {}, "hostmaster": {}, "webmaster": {},
+	}
 )
+
+// bcrypt silently truncates input to 72 bytes. Reject longer passwords up
+// front so users can't be confused by "I typed a long password and only
+// the first 72 chars actually count."
+const maxPasswordBytes = 72
 
 type Handler struct {
 	svc           *Service
@@ -38,12 +53,17 @@ func NewHandler(svc *Service, issuer *pkgauth.Issuer, refresh *RefreshStore, m *
 }
 
 func (h *Handler) Register(rg *gin.RouterGroup) {
-	rg.POST("/auth/register", h.register)
-	rg.POST("/auth/login", h.login)
+	// Sensitive unauthenticated endpoints — strict rate limit on top of
+	// the global one (1 r/s steady, burst 3, per client IP). Stops password
+	// spraying, account-creation floods, and reset-mail abuse.
+	strict := rg.Group("")
+	strict.Use(middleware.RateLimitStrict())
+	strict.POST("/auth/register", h.register)
+	strict.POST("/auth/login", h.login)
+	strict.POST("/auth/forgot-password", h.forgotPassword)
+	strict.POST("/auth/reset-password", h.resetPassword)
+	// /auth/refresh is hot during normal app use — global limit is enough.
 	rg.POST("/auth/refresh", h.refresh)
-	// Forgot/reset password are unauthenticated — user has no token yet.
-	rg.POST("/auth/forgot-password", h.forgotPassword)
-	rg.POST("/auth/reset-password", h.resetPassword)
 	// Email verification — the GET is public (link clicked from inbox);
 	// the POST to resend is authenticated.
 	rg.GET("/auth/verify-email", h.verifyEmail)
@@ -88,7 +108,7 @@ func (h *Handler) sendVerification(c *gin.Context) {
 		return
 	}
 
-	// 60s cooldown to prevent spam.
+	// 60s cooldown to prevent spam (in addition to the per-IP rate limit).
 	var lastIssued time.Time
 	_ = h.pool.QueryRow(c.Request.Context(),
 		`SELECT created_at FROM email_verify_tokens WHERE user_id = $1
@@ -98,30 +118,11 @@ func (h *Handler) sendVerification(c *gin.Context) {
 		return
 	}
 
-	tok, err := newToken()
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
-		return
-	}
-	expiresAt := time.Now().Add(24 * time.Hour)
-	if _, err := h.pool.Exec(c.Request.Context(),
-		`INSERT INTO email_verify_tokens (token, user_id, expires_at) VALUES ($1, $2, $3)`,
-		tok, uid, expiresAt); err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
-		return
-	}
-
-	// Link points straight at the API — it renders a tiny "验证成功" page
-	// for any browser the user happens to be in (no static-site routing needed).
-	apiBase := strings.Replace(strings.TrimRight(h.publicBaseURL, "/"), "://", "://app.", 1)
-	link := fmt.Sprintf("%s/api/v1/auth/verify-email?token=%s", apiBase, tok)
-	body := fmt.Sprintf("你好，\n\n点击下方链接验证你的邮箱（24 小时内有效）：\n\n%s\n\n如果不是你本人操作，请忽略此邮件。\n\n— DFCHAT", link)
-	_ = h.mailer.Send(email, "验证你的 DFCHAT 邮箱", body)
-
+	link := h.sendVerificationFor(c.Request.Context(), uid, email)
 	resp := gin.H{"ok": true}
-	if !h.mailer.Enabled() {
+	if !h.mailer.Enabled() && link != "" {
 		// Dev convenience: surface the link in the API response so the user
-		// doesn't need to grep the API logs.
+		// doesn't need to grep the api logs to grab it.
 		resp["devLink"] = link
 	}
 	c.JSON(http.StatusOK, resp)
@@ -129,49 +130,44 @@ func (h *Handler) sendVerification(c *gin.Context) {
 
 // verifyEmail (public) processes the link from the mail. Returns plain
 // text so it renders cleanly when opened in a browser tab.
+//
+// Token consumption is atomic: a single CTE deletes the row and returns
+// the user_id only if the token exists AND hasn't expired. This closes
+// a race where two concurrent clicks on the same link could both succeed.
+// It also makes the token strictly single-use — a leaked or copy-pasted
+// link can't be reused even within its 24h window.
 func (h *Handler) verifyEmail(c *gin.Context) {
 	tok := c.Query("token")
 	if tok == "" {
 		c.String(http.StatusBadRequest, "缺少 token 参数")
 		return
 	}
+
 	var uid int64
-	var expiresAt time.Time
-	err := h.pool.QueryRow(c.Request.Context(),
-		`SELECT user_id, expires_at FROM email_verify_tokens WHERE token = $1`, tok).Scan(&uid, &expiresAt)
+	err := h.pool.QueryRow(c.Request.Context(), `
+		WITH consumed AS (
+			DELETE FROM email_verify_tokens
+			WHERE token = $1 AND expires_at > now()
+			RETURNING user_id
+		)
+		UPDATE users SET email_verified = true
+		WHERE id = (SELECT user_id FROM consumed)
+		RETURNING id`, tok).Scan(&uid)
 	if errors.Is(err, pgx.ErrNoRows) {
-		c.String(http.StatusBadRequest, "验证链接无效或已使用")
+		// Either the token never existed, was already used, or expired.
+		// We don't distinguish — all three are "click resend".
+		c.String(http.StatusBadRequest, "验证链接无效、已使用或已过期。请回到客户端重新发送。")
 		return
 	}
 	if err != nil {
 		c.String(http.StatusInternalServerError, "内部错误")
-		return
-	}
-	if time.Now().After(expiresAt) {
-		c.String(http.StatusBadRequest, "验证链接已过期，请重新请求")
 		return
 	}
 
-	tx, err := h.pool.Begin(c.Request.Context())
-	if err != nil {
-		c.String(http.StatusInternalServerError, "内部错误")
-		return
-	}
-	defer tx.Rollback(c.Request.Context())
-	if _, err := tx.Exec(c.Request.Context(),
-		`UPDATE users SET email_verified = true WHERE id = $1`, uid); err != nil {
-		c.String(http.StatusInternalServerError, "更新失败")
-		return
-	}
-	if _, err := tx.Exec(c.Request.Context(),
-		`DELETE FROM email_verify_tokens WHERE user_id = $1`, uid); err != nil {
-		c.String(http.StatusInternalServerError, "更新失败")
-		return
-	}
-	if err := tx.Commit(c.Request.Context()); err != nil {
-		c.String(http.StatusInternalServerError, "更新失败")
-		return
-	}
+	// Belt-and-suspenders: drop any other outstanding tokens for this user.
+	// (They're now meaningless; verified is sticky.) Best-effort, ignore err.
+	_, _ = h.pool.Exec(c.Request.Context(),
+		`DELETE FROM email_verify_tokens WHERE user_id = $1`, uid)
 
 	c.String(http.StatusOK, "✅ 邮箱验证成功！可以回到 DFCHAT 客户端继续使用。")
 }
@@ -237,6 +233,10 @@ func (h *Handler) resetPassword(c *gin.Context) {
 	var req resetPasswordReq
 	if err := c.ShouldBindJSON(&req); err != nil || req.Token == "" || len(req.NewPassword) < 8 {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 10040, "message": "token + 至少 8 位新密码"})
+		return
+	}
+	if len(req.NewPassword) > maxPasswordBytes {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 10043, "message": "密码过长（最多 72 字节）"})
 		return
 	}
 
@@ -310,12 +310,24 @@ func (h *Handler) register(c *gin.Context) {
 		fail(c, http.StatusBadRequest, 10011, "username must be 3-32 chars, letters/digits/underscore")
 		return
 	}
-	if !emailRe.MatchString(req.Email) {
+	if _, reserved := reservedUsernames[strings.ToLower(req.Username)]; reserved {
+		fail(c, http.StatusBadRequest, 10016, "username is reserved")
+		return
+	}
+	if !emailRe.MatchString(req.Email) || len(req.Email) > 128 {
 		fail(c, http.StatusBadRequest, 10012, "invalid email")
 		return
 	}
 	if len(req.Password) < 8 {
 		fail(c, http.StatusBadRequest, 10013, "password must be at least 8 characters")
+		return
+	}
+	if len(req.Password) > maxPasswordBytes {
+		fail(c, http.StatusBadRequest, 10017, "password too long (max 72 bytes)")
+		return
+	}
+	if len(req.Nickname) > 64 {
+		fail(c, http.StatusBadRequest, 10018, "nickname too long (max 64 chars)")
 		return
 	}
 
@@ -331,7 +343,44 @@ func (h *Handler) register(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, 50001, "internal error")
 		return
 	}
+
+	// Auto-send the verification email. Done in a goroutine so registration
+	// returns immediately even on slow SMTP — the worst case for the user
+	// is a 1-2s wait on the resend button (60s server cooldown protects
+	// against duplicate-send races). Detached ctx since request ctx is
+	// cancelled when we return below.
+	go func(uid int64, email string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		h.sendVerificationFor(ctx, uid, email)
+	}(u.ID, u.Email)
+
 	c.JSON(http.StatusCreated, gin.H{"user": u})
+}
+
+// sendVerificationFor issues + mails a verification link for the given
+// user. Used by both the explicit /auth/send-verification endpoint and
+// the auto-trigger on successful registration. Returns the link so dev
+// mode (no SMTP) can surface it in the API response; in prod the link
+// only goes out via the mail. Errors are swallowed because callers can't
+// act on a failed send anyway (user retries via the in-app button) — the
+// mailer logs them.
+func (h *Handler) sendVerificationFor(ctx context.Context, uid int64, email string) string {
+	tok, err := newToken()
+	if err != nil {
+		return ""
+	}
+	expiresAt := time.Now().Add(24 * time.Hour)
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO email_verify_tokens (token, user_id, expires_at) VALUES ($1, $2, $3)`,
+		tok, uid, expiresAt); err != nil {
+		return ""
+	}
+	apiBase := strings.Replace(strings.TrimRight(h.publicBaseURL, "/"), "://", "://app.", 1)
+	link := fmt.Sprintf("%s/api/v1/auth/verify-email?token=%s", apiBase, tok)
+	body := fmt.Sprintf("你好，\n\n感谢注册 DFCHAT。点击下方链接验证你的邮箱（24 小时内有效）：\n\n%s\n\n如果不是你本人操作，请忽略此邮件。\n\n— DFCHAT", link)
+	_ = h.mailer.Send(email, "验证你的 DFCHAT 邮箱", body)
+	return link
 }
 
 type loginReq struct {
@@ -465,6 +514,10 @@ func (h *Handler) changePassword(c *gin.Context) {
 	var req changePasswordReq
 	if err := c.ShouldBindJSON(&req); err != nil || req.CurrentPassword == "" || req.NewPassword == "" {
 		fail(c, http.StatusBadRequest, 10050, "currentPassword and newPassword required")
+		return
+	}
+	if len(req.NewPassword) > maxPasswordBytes {
+		fail(c, http.StatusBadRequest, 10053, "new password too long (max 72 bytes)")
 		return
 	}
 	if err := h.svc.ChangePassword(c.Request.Context(), uid, req.CurrentPassword, req.NewPassword); err != nil {
