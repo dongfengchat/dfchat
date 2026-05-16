@@ -78,6 +78,32 @@ func (r *Repo) SendRequest(ctx context.Context, requester, target int64) error {
 		return ErrAlreadyRequested
 	}
 
+	// Rejected within the last 7 days → silently behave like the request
+	// is already pending. We use the same error code to avoid leaking to
+	// the harasser that the target actively rejected them; from the UI's
+	// perspective it just looks like a pending request that never gets a
+	// response. After the cooldown the row stays at status=3 and a fresh
+	// SendRequest can re-INSERT (ON CONFLICT DO NOTHING below, then we
+	// would need to overwrite — so explicitly clear the cooldown row).
+	var rejectedAt time.Time
+	err = tx.QueryRow(ctx,
+		`SELECT created_at FROM friendships
+		 WHERE user_id=$1 AND friend_id=$2 AND status=3`, requester, target).Scan(&rejectedAt)
+	if err == nil {
+		if time.Since(rejectedAt) < 7*24*time.Hour {
+			return ErrAlreadyRequested
+		}
+		// Cooldown expired — clear the stale row so the INSERT below
+		// goes through cleanly.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM friendships WHERE user_id=$1 AND friend_id=$2 AND status=3`,
+			requester, target); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
 	// Reciprocal pending (target previously requested me) → auto-accept.
 	var existsReciprocal bool
 	if err := tx.QueryRow(ctx,
@@ -132,10 +158,15 @@ func (r *Repo) AcceptRequest(ctx context.Context, me, from int64) error {
 	return tx.Commit(ctx)
 }
 
-// RejectRequest drops a pending (from→me) row.
+// RejectRequest marks a pending (from→me) row as "rejected with
+// cooldown" (status=3) and refreshes created_at to anchor the 7-day
+// silence window enforced in SendRequest. We don't DELETE — that would
+// let a harasser re-request immediately. The row gets garbage-collected
+// by the user-soft-delete cascade or future cleanup sweeps.
 func (r *Repo) RejectRequest(ctx context.Context, me, from int64) error {
 	tag, err := r.pool.Exec(ctx,
-		`DELETE FROM friendships WHERE user_id=$1 AND friend_id=$2 AND status=0`,
+		`UPDATE friendships SET status=3, created_at=now()
+		 WHERE user_id=$1 AND friend_id=$2 AND status=0`,
 		from, me)
 	if err != nil {
 		return err

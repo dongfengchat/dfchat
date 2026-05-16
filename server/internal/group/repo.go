@@ -377,10 +377,44 @@ func (r *Repo) Kick(ctx context.Context, groupID, userID int64) error {
 		userID, groupID); err != nil {
 		return err
 	}
+	// Rotate the invite code so the kicked user can't immediately rejoin
+	// with the same code they already know. Remaining members will need
+	// to refetch the group detail to see the new code — a small UX hit,
+	// but the alternative (kick-then-rejoin no-op) is worse.
+	newCode, err := generateInviteCode()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE groups SET invite_code = $2 WHERE id = $1`, groupID, newCode); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
 // IsMember reports whether userID belongs to groupID.
+// SharesGroupWith reports whether two users belong to at least one
+// group in common. Used by the WS relay backend to decide whether `a`
+// is allowed to send WebRTC signaling or typing pings to `b` even if
+// they aren't direct friends.
+func (r *Repo) SharesGroupWith(ctx context.Context, a, b int64) (bool, error) {
+	if a == b {
+		return false, nil
+	}
+	var n int
+	err := r.pool.QueryRow(ctx, `
+		SELECT 1
+		FROM group_members ga
+		JOIN group_members gb ON ga.group_id = gb.group_id
+		WHERE ga.user_id = $1 AND gb.user_id = $2
+		LIMIT 1`, a, b).Scan(&n)
+	if err != nil {
+		// pgx.ErrNoRows or other — treat as no shared group.
+		return false, nil
+	}
+	return n == 1, nil
+}
+
 func (r *Repo) IsMember(ctx context.Context, groupID, userID int64) (bool, error) {
 	var ok int
 	err := r.pool.QueryRow(ctx,

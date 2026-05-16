@@ -102,7 +102,12 @@ func main() {
 	adminHandler := admin.NewHandler(pool, issuer, auditor)
 	searchHandler := search.NewHandler(pool, issuer)
 	liveHandler := live.NewHandler(liveRepo, issuer, bus, cfg.LiveRTMPURL, cfg.LiveHLSURL, cfg.LiveSRSSecret)
-	realtimeHandler := realtime.NewHandler(issuer, bus, log, liveRepo)
+	// relayAdapter implements realtime.RelayBackend: a relay (WebRTC
+	// signaling, typing) is allowed iff sender and recipient are friends
+	// or share at least one group. This keeps strangers from initiating
+	// calls or pinging "X is typing" at arbitrary user ids.
+	relayAdapter := relayBackend{friends: friendRepo, groups: groupRepo}
+	realtimeHandler := realtime.NewHandler(issuer, bus, log, liveRepo, relayAdapter, cfg.CORSAllowOrigins)
 	// Realtime owns the room subscriber set, live needs to query it for
 	// /viewers — wire the back-reference now that both exist.
 	liveHandler.AttachViewerSource(realtimeHandler)
@@ -177,6 +182,24 @@ func main() {
 		log.Error("shutdown error", "err", err)
 	}
 	log.Info("bye")
+}
+
+// relayBackend implements realtime.RelayBackend by stitching friend +
+// group repos together. The realtime handler stays decoupled from those
+// domain packages this way.
+type relayBackend struct {
+	friends *friend.Repo
+	groups  *group.Repo
+}
+
+func (r relayBackend) CanRelay(ctx context.Context, from, to int64) (bool, error) {
+	if from == to {
+		return false, nil
+	}
+	if ok, _ := r.friends.AreFriends(ctx, from, to); ok {
+		return true, nil
+	}
+	return r.groups.SharesGroupWith(ctx, from, to)
 }
 
 func requestLogger(log interface{ Info(msg string, args ...any) }) gin.HandlerFunc {

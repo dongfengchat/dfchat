@@ -25,9 +25,16 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	g := rg.Group("/friends")
 	g.Use(middleware.RequireAuth(h.issuer))
 	g.GET("", h.list)
-	g.POST("", h.add) // legacy: behaves like sendRequest now
+	// Friend-request send paths are the only realistic spam vector here
+	// (harassment via repeated requests after cancels). 0.5 r/s, burst 3
+	// = 3 immediate then 1 every 2s — plenty for legitimate use, brutal
+	// for bots. Combined with the per-target 7d cooldown after a reject
+	// (see SendRequest), this should make harassment impractical.
+	requestSend := g.Group("")
+	requestSend.Use(middleware.RateLimitPerUser(0.5, 3))
+	requestSend.POST("", h.add) // legacy alias
+	requestSend.POST("/requests", h.sendRequest)
 	g.DELETE("/:id", h.remove)
-	g.POST("/requests", h.sendRequest)
 	g.GET("/requests", h.listRequests)
 	g.POST("/requests/:id/accept", h.acceptRequest)
 	g.DELETE("/requests/:id", h.rejectOrCancel)

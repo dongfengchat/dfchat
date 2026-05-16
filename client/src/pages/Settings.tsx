@@ -214,6 +214,23 @@ function ProfileTab({ me, onSaved }: { me: ReturnType<typeof useUserStore.getSta
 
       <EmailRow email={me?.email ?? ''} verified={!!me?.emailVerified} onVerified={() => onSaved({ ...(me as NonNullable<typeof me>), emailVerified: true })} />
 
+      {/* Read-only account metadata. Handy for support tickets ("我的账号
+          ID 是 42") and account-age sanity checks. */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <label className="text-xs text-ink-3">账号 ID</label>
+          <input className="input opacity-60" value={me?.id ?? ''} disabled />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs text-ink-3">注册时间</label>
+          <input
+            className="input opacity-60"
+            value={me?.createdAt ? new Date(me.createdAt).toLocaleString('zh-CN', { hour12: false }) : ''}
+            disabled
+          />
+        </div>
+      </div>
+
       <div className="space-y-1.5">
         <label className="text-xs text-ink-3">昵称</label>
         <input

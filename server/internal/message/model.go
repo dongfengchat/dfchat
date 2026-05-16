@@ -51,3 +51,21 @@ func PrivateConvID(a, b int64) string {
 	}
 	return fmt.Sprintf("p_%d_%d", a, b)
 }
+
+// recalledContent is the body emitted in place of the original payload
+// for recalled messages. We keep `isRecalled=true` alongside so the
+// client UI knows to render "此消息已撤回".
+var recalledContent = json.RawMessage(`{}`)
+
+// RedactRecalled mutates the slice in place, replacing the content of
+// any message with is_recalled=true. Mentions / replyTo / reactions are
+// kept (they're already-public metadata: who was @mentioned, what was
+// quoted). The original text body would otherwise leak via /list and
+// /pins endpoints despite the "recalled" flag.
+func RedactRecalled(msgs []*Message) {
+	for _, m := range msgs {
+		if m != nil && m.IsRecalled {
+			m.Content = recalledContent
+		}
+	}
+}

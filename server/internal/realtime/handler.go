@@ -7,13 +7,16 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dongfang/dfchat/server/pkg/auth"
 	"github.com/dongfang/dfchat/server/pkg/wsbus"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"golang.org/x/time/rate"
 )
 
 // LiveBackend is the subset of live.Repo realtime needs for danmaku
@@ -26,41 +29,96 @@ type LiveBackend interface {
 	IsBanned(ctx context.Context, roomID, userID int64) (banned, isKick bool, err error)
 }
 
+// RelayBackend gates peer-to-peer WS-relayed messages (WebRTC signaling
+// and typing). Returns true if `from` is allowed to send a relayed
+// message to `to`. Implementation should check: shared friendship, or
+// shared group membership. Keeps WebRTC sessions from being initiated
+// by arbitrary accounts (spam) and stops typing-state leakage to
+// strangers.
+type RelayBackend interface {
+	CanRelay(ctx context.Context, from, to int64) (bool, error)
+}
+
 const (
 	writeWait  = 10 * time.Second
 	pongWait   = 60 * time.Second
 	pingPeriod = 30 * time.Second
+
+	// Hard caps to keep one user / one bad client from exhausting server
+	// resources. Tuned generous-but-not-stupid for a desktop chat client
+	// that typically maintains 1 connection + a handful of subscribed
+	// live rooms.
+	maxConnsPerUser  = 5    // Electron + multi-device + a couple reconnect-laggers
+	maxRoomsPerConn  = 50   // far more than anyone realistically watches
+	wsInboundRPS     = 20.0 // sustained inbound messages per second
+	wsInboundBurst   = 40   // brief spike allowance
+	wsReadLimitBytes = 64 * 1024
+
+	// Close codes for graceful client UX.
+	closeCodeTokenExpired = 4401
+	closeCodeTooManyConns = 4429
 )
 
 type Handler struct {
-	issuer *auth.Issuer
-	bus    *wsbus.Bus
-	log    *slog.Logger
-	live   LiveBackend // optional — nil disables persistence + ban check
-	up     websocket.Upgrader
+	issuer         *auth.Issuer
+	bus            *wsbus.Bus
+	log            *slog.Logger
+	live           LiveBackend  // optional — nil disables persistence + ban check
+	relay          RelayBackend // optional — nil disables peer-relay gating (dev)
+	allowedOrigins []string     // exact-match list; "*" allows all
+	up             websocket.Upgrader
 
-	// liveSubs[roomId] = set of userIDs currently subscribed to that
-	// live room's danmaku channel. Guarded by liveMu. Cleared lazily
-	// when a user disconnects (we keep stale entries; bus.Publish is a
-	// no-op for absent users so it's harmless).
+	// liveSubs[roomId] = set of userIDs currently subscribed. Guarded
+	// by liveMu. Cleaned on disconnect via the per-conn rooms set.
 	liveMu   sync.Mutex
 	liveSubs map[string]map[int64]struct{}
+
+	// Per-user connection accounting for the cap.
+	connMu    sync.Mutex
+	connCount map[int64]int
 }
 
-func NewHandler(issuer *auth.Issuer, bus *wsbus.Bus, log *slog.Logger, live LiveBackend) *Handler {
-	return &Handler{
-		issuer:   issuer,
-		bus:      bus,
-		log:      log,
-		live:     live,
-		liveSubs: make(map[string]map[int64]struct{}),
-		up: websocket.Upgrader{
-			ReadBufferSize:  4096,
-			WriteBufferSize: 4096,
-			// MVP: allow all origins. Tighten before production.
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
+func NewHandler(issuer *auth.Issuer, bus *wsbus.Bus, log *slog.Logger, live LiveBackend, relay RelayBackend, allowedOrigins []string) *Handler {
+	h := &Handler{
+		issuer:         issuer,
+		bus:            bus,
+		log:            log,
+		live:           live,
+		relay:          relay,
+		allowedOrigins: allowedOrigins,
+		liveSubs:       make(map[string]map[int64]struct{}),
+		connCount:      make(map[int64]int),
 	}
+	h.up = websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin:     h.checkOrigin,
+	}
+	return h
+}
+
+// checkOrigin enforces an allowlist on the WebSocket upgrade. Without
+// this, a malicious web page could open a WS as a victim's authenticated
+// browser (cross-site WebSocket hijacking). Electron's renderer process
+// uses `file://` origin so we explicitly accept that. The allowlist
+// matches our HTTP CORS config plus the Electron origin.
+func (h *Handler) checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Non-browser clients (curl, Go tests) don't send Origin; we
+		// trust those because they don't have ambient-credential drives.
+		return true
+	}
+	for _, allowed := range h.allowedOrigins {
+		if allowed == "*" || allowed == origin {
+			return true
+		}
+	}
+	// Always accept the Electron renderer's null/file origin.
+	if origin == "null" || strings.HasPrefix(origin, "file://") {
+		return true
+	}
+	return false
 }
 
 func (h *Handler) Register(r *gin.Engine) {
@@ -88,6 +146,19 @@ type serverEnvelope struct {
 	Payload any    `json:"payload,omitempty"`
 }
 
+// conn wraps a single websocket connection plus its per-connection
+// bookkeeping (rate limiter, subscribed rooms, token expiry). Each
+// connection has exactly one read goroutine and one write goroutine.
+type conn struct {
+	ws         *websocket.Conn
+	userID     int64
+	expiresAt  time.Time
+	rooms      map[string]struct{} // rooms this conn has subscribed to
+	roomsMu    sync.Mutex
+	limiter    *rate.Limiter
+	closed     atomic.Bool
+}
+
 func (h *Handler) handle(c *gin.Context) {
 	tokenStr := c.Query("token")
 	if tokenStr == "" {
@@ -100,38 +171,139 @@ func (h *Handler) handle(c *gin.Context) {
 		return
 	}
 	userID := claims.UserID
+	expiresAt := claims.ExpiresAt.Time
 
-	conn, err := h.up.Upgrade(c.Writer, c.Request, nil)
+	// Enforce per-user connection cap BEFORE upgrade so we don't waste
+	// upgrade-cost on a connection we'll immediately reject.
+	if !h.acquireConnSlot(userID) {
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"code":    42910,
+			"message": "too many active connections for this account",
+		})
+		return
+	}
+
+	ws, err := h.up.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
+		h.releaseConnSlot(userID)
 		h.log.Warn("ws upgrade failed", "err", err)
 		return
 	}
 	h.log.Info("ws connected", "userID", userID, "ip", c.ClientIP())
 
-	conn.SetReadLimit(64 * 1024)
-	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
-	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(pongWait))
+	ws.SetReadLimit(wsReadLimitBytes)
+	_ = ws.SetReadDeadline(time.Now().Add(pongWait))
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(pongWait))
 	})
 
+	cn := &conn{
+		ws:        ws,
+		userID:    userID,
+		expiresAt: expiresAt,
+		rooms:     make(map[string]struct{}),
+		limiter:   rate.NewLimiter(rate.Limit(wsInboundRPS), wsInboundBurst),
+	}
+
 	ch, unsub := h.bus.Subscribe(userID)
-	defer unsub()
+
+	// Ensure full cleanup whatever path the connection dies on.
+	defer func() {
+		cn.closed.Store(true)
+		unsub()
+		h.cleanupConnRooms(cn)
+		h.releaseConnSlot(userID)
+		_ = ws.Close()
+		h.log.Info("ws disconnected", "userID", userID)
+	}()
 
 	stop := make(chan struct{})
-	go h.readLoop(conn, userID, stop)
-	h.writeLoop(conn, ch, stop)
-
-	h.log.Info("ws disconnected", "userID", userID)
+	go h.readLoop(cn, stop)
+	h.writeLoop(cn, ch, stop)
 }
 
-func (h *Handler) readLoop(conn *websocket.Conn, userID int64, stop chan struct{}) {
+// acquireConnSlot tries to register one more connection for userID,
+// rejecting if they're already at the per-user cap. Returns false on
+// rejection.
+func (h *Handler) acquireConnSlot(userID int64) bool {
+	h.connMu.Lock()
+	defer h.connMu.Unlock()
+	if h.connCount[userID] >= maxConnsPerUser {
+		return false
+	}
+	h.connCount[userID]++
+	return true
+}
+
+func (h *Handler) releaseConnSlot(userID int64) {
+	h.connMu.Lock()
+	defer h.connMu.Unlock()
+	if h.connCount[userID] > 0 {
+		h.connCount[userID]--
+		if h.connCount[userID] == 0 {
+			delete(h.connCount, userID)
+		}
+	}
+}
+
+// cleanupConnRooms removes this connection's user from every live-room
+// subscriber set it joined. Without this, leaving / crashing clients
+// keep inflating the viewer count of rooms they're no longer watching,
+// and the room map grows monotonically.
+func (h *Handler) cleanupConnRooms(cn *conn) {
+	cn.roomsMu.Lock()
+	rooms := make([]string, 0, len(cn.rooms))
+	for r := range cn.rooms {
+		rooms = append(rooms, r)
+	}
+	cn.rooms = nil
+	cn.roomsMu.Unlock()
+
+	for _, roomID := range rooms {
+		// Reuse the unsubscribe path so viewer-count is broadcast
+		// correctly to remaining subscribers.
+		h.removeLiveSub(cn.userID, roomID)
+	}
+}
+
+func (h *Handler) removeLiveSub(userID int64, roomID string) {
+	h.liveMu.Lock()
+	subs, ok := h.liveSubs[roomID]
+	if !ok {
+		h.liveMu.Unlock()
+		return
+	}
+	_, wasSubscribed := subs[userID]
+	delete(subs, userID)
+	count := len(subs)
+	if count == 0 {
+		delete(h.liveSubs, roomID)
+	}
+	targets := h.snapshotSubsLocked(roomID)
+	h.liveMu.Unlock()
+
+	if wasSubscribed {
+		h.persistViewerCount(roomID, count, false)
+		h.broadcastViewerCount(targets, roomID, count)
+	}
+}
+
+func (h *Handler) readLoop(cn *conn, stop chan struct{}) {
 	defer close(stop)
-	defer conn.Close()
 	for {
-		_, raw, err := conn.ReadMessage()
+		_, raw, err := cn.ws.ReadMessage()
 		if err != nil {
-			h.log.Info("ws read closed", "userID", userID, "err", err.Error())
+			h.log.Info("ws read closed", "userID", cn.userID, "err", err.Error())
 			return
+		}
+		// Per-connection inbound rate limit. Blocks scripted flooders
+		// from amplifying via fan-out (typing / danmaku) and keeps the
+		// readLoop responsive for legitimate clients.
+		if !cn.limiter.Allow() {
+			// Don't drop the connection — just skip this frame. A
+			// flood will hit it repeatedly; eventually the client
+			// either backs off or the OS-level write timeout closes us.
+			continue
 		}
 		var env clientEnvelope
 		if err := json.Unmarshal(raw, &env); err != nil {
@@ -139,19 +311,19 @@ func (h *Handler) readLoop(conn *websocket.Conn, userID int64, stop chan struct{
 		}
 		switch env.Type {
 		case "ping":
-			h.bus.Publish(userID, wsbus.Event{Type: "pong", Payload: map[string]any{"ackId": env.MsgID}})
+			h.bus.Publish(cn.userID, wsbus.Event{Type: "pong", Payload: map[string]any{"ackId": env.MsgID}})
 		case "call.invite", "call.accept", "call.reject", "call.signal", "call.end":
-			h.relayCall(userID, env)
+			h.relayCall(cn.userID, env)
 		case "live.subscribe":
-			h.handleLiveSubscribe(userID, env)
+			h.handleLiveSubscribe(cn, env)
 		case "live.unsubscribe":
-			h.handleLiveUnsubscribe(userID, env)
+			h.handleLiveUnsubscribe(cn, env)
 		case "live.danmaku.send":
-			h.handleLiveDanmaku(userID, env)
+			h.handleLiveDanmaku(cn.userID, env)
 		case "typing.start", "typing.stop":
-			h.handleTyping(userID, env)
+			h.handleTyping(cn.userID, env)
 		default:
-			// MVP: chat messages go over REST POST /api/v1/messages.
+			// Chat messages go over REST POST /api/v1/messages.
 			// WS is push-only for chat. Ignore unknown control types.
 		}
 	}
@@ -159,7 +331,9 @@ func (h *Handler) readLoop(conn *websocket.Conn, userID int64, stop chan struct{
 
 // relayCall forwards a call control message from senderID to the user
 // referenced by payload.to. The payload is augmented with `from` so the
-// peer knows who's calling. Server has no concept of "call state".
+// peer knows who's calling. Gated on the RelayBackend's CanRelay check
+// to prevent unsolicited WebRTC signaling from strangers — without it,
+// any authenticated account could spam call-invites at any other id.
 func (h *Handler) relayCall(senderID int64, env clientEnvelope) {
 	var route callPayload
 	if err := json.Unmarshal(env.Payload, &route); err != nil || route.To == "" {
@@ -169,7 +343,18 @@ func (h *Handler) relayCall(senderID int64, env clientEnvelope) {
 	if err != nil || toID <= 0 {
 		return
 	}
-	// Inject `from` into the payload so the receiver can answer.
+	if h.relay != nil {
+		ok, _ := h.relay.CanRelay(context.Background(), senderID, toID)
+		if !ok {
+			// Bounce back to the caller so the client can surface
+			// "you can only call friends" rather than silent timeout.
+			h.bus.Publish(senderID, wsbus.Event{
+				Type:    "call.rejected",
+				Payload: map[string]any{"to": route.To, "reason": "not_allowed"},
+			})
+			return
+		}
+	}
 	var asMap map[string]any
 	if err := json.Unmarshal(env.Payload, &asMap); err != nil {
 		return
@@ -195,17 +380,6 @@ func senderIDString(id int64) string {
 }
 
 // --- live danmaku --------------------------------------------------
-//
-// Subscription model: a viewer client sends `live.subscribe {roomId}` when
-// it opens a stream and `live.unsubscribe {roomId}` when it leaves. Any
-// `live.danmaku.send {roomId, text}` is fanned out as `live.danmaku.recv`
-// to every subscriber of that room.
-//
-// We also:
-//   - count unique viewers per room (size of the per-room user set) and
-//     broadcast `live.viewer.count` whenever it changes.
-//   - persist danmaku to PG so late joiners can fetch recent history.
-//   - check the room's ban list before accepting a danmaku.
 
 type liveSubPayload struct {
 	RoomID string `json:"roomId"`
@@ -217,49 +391,51 @@ type liveDanmakuSendPayload struct {
 	Color  string `json:"color,omitempty"`
 }
 
-func (h *Handler) handleLiveSubscribe(userID int64, env clientEnvelope) {
+func (h *Handler) handleLiveSubscribe(cn *conn, env clientEnvelope) {
 	var p liveSubPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil || p.RoomID == "" {
 		return
 	}
+
+	// Per-connection cap on the size of the rooms set. Stops a malicious
+	// client from stuffing the in-memory map with millions of fake room
+	// ids to balloon memory + broadcast fanout.
+	cn.roomsMu.Lock()
+	if len(cn.rooms) >= maxRoomsPerConn {
+		cn.roomsMu.Unlock()
+		return
+	}
+	_, already := cn.rooms[p.RoomID]
+	cn.rooms[p.RoomID] = struct{}{}
+	cn.roomsMu.Unlock()
+
 	h.liveMu.Lock()
 	if h.liveSubs[p.RoomID] == nil {
 		h.liveSubs[p.RoomID] = make(map[int64]struct{})
 	}
-	_, alreadySubscribed := h.liveSubs[p.RoomID][userID]
-	h.liveSubs[p.RoomID][userID] = struct{}{}
+	_, alreadySubscribed := h.liveSubs[p.RoomID][cn.userID]
+	h.liveSubs[p.RoomID][cn.userID] = struct{}{}
 	count := len(h.liveSubs[p.RoomID])
 	targets := h.snapshotSubsLocked(p.RoomID)
 	h.liveMu.Unlock()
 
-	h.persistViewerCount(p.RoomID, count, !alreadySubscribed)
-	h.broadcastViewerCount(targets, p.RoomID, count)
+	// Only persist + broadcast on the first sub from this user across
+	// any of their connections — saves a write per noisy reconnect.
+	if !already && !alreadySubscribed {
+		h.persistViewerCount(p.RoomID, count, true)
+		h.broadcastViewerCount(targets, p.RoomID, count)
+	}
 }
 
-func (h *Handler) handleLiveUnsubscribe(userID int64, env clientEnvelope) {
+func (h *Handler) handleLiveUnsubscribe(cn *conn, env clientEnvelope) {
 	var p liveSubPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil || p.RoomID == "" {
 		return
 	}
-	h.liveMu.Lock()
-	subs, ok := h.liveSubs[p.RoomID]
-	if !ok {
-		h.liveMu.Unlock()
-		return
-	}
-	_, wasSubscribed := subs[userID]
-	delete(subs, userID)
-	count := len(subs)
-	if count == 0 {
-		delete(h.liveSubs, p.RoomID)
-	}
-	targets := h.snapshotSubsLocked(p.RoomID)
-	h.liveMu.Unlock()
-
-	if wasSubscribed {
-		h.persistViewerCount(p.RoomID, count, false)
-		h.broadcastViewerCount(targets, p.RoomID, count)
-	}
+	cn.roomsMu.Lock()
+	delete(cn.rooms, p.RoomID)
+	cn.roomsMu.Unlock()
+	h.removeLiveSub(cn.userID, p.RoomID)
 }
 
 func (h *Handler) handleLiveDanmaku(userID int64, env clientEnvelope) {
@@ -301,7 +477,6 @@ func (h *Handler) handleLiveDanmaku(userID int64, env clientEnvelope) {
 	}
 	for _, uid := range targets {
 		if uid == userID {
-			// Sender does its own optimistic render; skip echo to avoid dupes.
 			continue
 		}
 		h.bus.Publish(uid, wsbus.Event{Type: "live.danmaku.recv", Payload: payload})
@@ -310,12 +485,10 @@ func (h *Handler) handleLiveDanmaku(userID int64, env clientEnvelope) {
 
 // =============== Typing indicator (forward-only) ===============
 //
-// Clients send {type:"typing.start"|"typing.stop", conversationId, recipientIds[]}
-// and we fan out to each recipient. We don't auto-look-up conversation
-// membership server-side — the client already knows it (friend pair /
-// group members / channel viewers). Trust is OK because typing is a
-// pure UX hint with no security implication; a malicious client at
-// worst spams "X is typing" to people they could already message anyway.
+// Typing pings are gated on the same RelayBackend the WebRTC code uses
+// (friend or shared-group), so a malicious client can't poke "X is
+// typing" at arbitrary user ids. Without that gate the typing channel
+// becomes a casual user-id existence oracle.
 
 type typingPayload struct {
 	ConversationID string   `json:"conversationId"`
@@ -336,6 +509,12 @@ func (h *Handler) handleTyping(userID int64, env clientEnvelope) {
 		rid, err := strconv.ParseInt(ridStr, 10, 64)
 		if err != nil || rid == userID {
 			continue
+		}
+		if h.relay != nil {
+			ok, _ := h.relay.CanRelay(context.Background(), userID, rid)
+			if !ok {
+				continue
+			}
 		}
 		h.bus.Publish(rid, wsbus.Event{Type: env.Type, Payload: payload})
 	}
@@ -380,27 +559,50 @@ func (h *Handler) broadcastViewerCount(targets []int64, roomID string, count int
 	}
 }
 
-func (h *Handler) writeLoop(conn *websocket.Conn, ch <-chan wsbus.Event, stop chan struct{}) {
+func (h *Handler) writeLoop(cn *conn, ch <-chan wsbus.Event, stop chan struct{}) {
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
-	defer conn.Close()
+
+	// Token-expiry timer: when the access token's exp passes, we close
+	// the socket with a distinct 4401 close code. The client knows to
+	// refresh + reopen rather than tight-looping on the same dead token.
+	// Skip the timer if exp is zero (shouldn't happen — defensive).
+	var expireC <-chan time.Time
+	if !cn.expiresAt.IsZero() {
+		d := time.Until(cn.expiresAt)
+		if d < 0 {
+			d = 0
+		}
+		t := time.NewTimer(d)
+		defer t.Stop()
+		expireC = t.C
+	}
 
 	for {
 		select {
 		case <-stop:
+			return
+		case <-expireC:
+			h.log.Info("ws token expired, closing", "userID", cn.userID)
+			_ = cn.ws.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(closeCodeTokenExpired, "token expired, please refresh"),
+				time.Now().Add(time.Second))
 			return
 		case ev, ok := <-ch:
 			if !ok {
 				return
 			}
 			env := serverEnvelope{Type: ev.Type, TS: time.Now().UnixMilli(), Payload: ev.Payload}
-			_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := conn.WriteJSON(env); err != nil {
+			_ = cn.ws.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := cn.ws.WriteJSON(env); err != nil {
+				// Slow / dead consumer — drop the connection so the
+				// publisher channel can drain rather than back-pressuring
+				// other broadcasts (e.g. live danmaku fan-out).
 				return
 			}
 		case <-ticker.C:
-			_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			_ = cn.ws.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := cn.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}

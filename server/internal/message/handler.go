@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/dongfang/dfchat/server/internal/channel"
 	"github.com/dongfang/dfchat/server/internal/friend"
@@ -31,13 +32,18 @@ func NewHandler(repo *Repo, friends *friend.Repo, groups *group.Repo, channels *
 func (h *Handler) Register(rg *gin.RouterGroup) {
 	g := rg.Group("/messages")
 	g.Use(middleware.RequireAuth(h.issuer))
-	g.POST("", h.send)
+	// Per-user rate limit for write paths. 5 r/s sustained, burst 15 —
+	// generous for normal chat (humans type ~1-2 msgs/sec under stress)
+	// but cuts off scripted floods. Reads stay on the global 30 r/s.
+	write := g.Group("")
+	write.Use(middleware.RateLimitPerUser(5, 15))
+	write.POST("", h.send)
+	write.POST("/:id/recall", h.recall)
+	write.POST("/:id/reactions", h.addReaction)
+	write.DELETE("/:id/reactions/:emoji", h.removeReaction)
+	write.POST("/:id/pin", h.pin)
+	write.DELETE("/:id/pin", h.unpin)
 	g.GET("", h.list)
-	g.POST("/:id/recall", h.recall)
-	g.POST("/:id/reactions", h.addReaction)
-	g.DELETE("/:id/reactions/:emoji", h.removeReaction)
-	g.POST("/:id/pin", h.pin)
-	g.DELETE("/:id/pin", h.unpin)
 
 	// Conversation-scoped endpoints (pins list + read receipt + prefs).
 	convs := rg.Group("/conversations")
@@ -70,6 +76,14 @@ func (h *Handler) send(c *gin.Context) {
 	}
 	if len(req.Content) == 0 {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20011, "message": "content required"})
+		return
+	}
+	if err := validateContent(req.Type, req.Content); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20024, "message": err.Error()})
+		return
+	}
+	if len(req.Mentions) > maxMentionsPerMsg {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20025, "message": "too many mentions"})
 		return
 	}
 
@@ -164,13 +178,37 @@ func (h *Handler) send(c *gin.Context) {
 		return
 	}
 
+	// Filter mentions: keep only ids that actually belong to this
+	// conversation. Stops a sender from notifying random users (or
+	// probing user-id existence via mention fan-out) and quietly drops
+	// kicked / former members so they don't get phantom pings.
 	mentions := parseMentions(req.Mentions)
+	if len(mentions) > 0 {
+		validMembers, err := h.repo.MembersOf(c.Request.Context(), convID)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+			return
+		}
+		mentions = filterMentions(mentions, validMembers)
+	}
 
 	var replyTo *int64
 	if req.ReplyTo != "" {
-		if id, err := strconv.ParseInt(req.ReplyTo, 10, 64); err == nil && id > 0 {
-			replyTo = &id
+		id, perr := strconv.ParseInt(req.ReplyTo, 10, 64)
+		if perr != nil || id <= 0 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20026, "message": "invalid replyTo"})
+			return
 		}
+		// Verify the quoted message lives in the SAME conversation. Stops
+		// a user from quoting a private message they have no access to
+		// (the quote-card UI on the client would otherwise leak its
+		// metadata, and the very existence of the id is information).
+		quotedConv, err := h.repo.ConvOfMessage(c.Request.Context(), id)
+		if err != nil || quotedConv != convID {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20027, "message": "replyTo not in this conversation"})
+			return
+		}
+		replyTo = &id
 	}
 
 	m, err := h.repo.Insert(c.Request.Context(), InsertParams{
@@ -199,6 +237,32 @@ func parseMentions(raw []string) []int64 {
 		if id, err := strconv.ParseInt(s, 10, 64); err == nil && id > 0 {
 			out = append(out, id)
 		}
+	}
+	return out
+}
+
+// filterMentions keeps only ids that are members of the conversation
+// (deduplicated). Order from the caller is preserved for ids that
+// survive, which keeps the @-list reading natural in the UI.
+func filterMentions(mentions, members []int64) []int64 {
+	if len(mentions) == 0 || len(members) == 0 {
+		return nil
+	}
+	memberSet := make(map[int64]struct{}, len(members))
+	for _, m := range members {
+		memberSet[m] = struct{}{}
+	}
+	seen := make(map[int64]struct{}, len(mentions))
+	out := mentions[:0]
+	for _, m := range mentions {
+		if _, ok := memberSet[m]; !ok {
+			continue
+		}
+		if _, dup := seen[m]; dup {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
 	}
 	return out
 }
@@ -279,6 +343,10 @@ func (h *Handler) list(c *gin.Context) {
 	if _, err := h.repo.AttachReactions(c.Request.Context(), msgs); err != nil {
 		// Non-fatal: log via the response anyway.
 	}
+	// Recalled messages keep their row + flag for sequencing, but their
+	// content body is replaced with `{}` so the original payload doesn't
+	// leak via this catch-up endpoint.
+	RedactRecalled(msgs)
 	c.JSON(http.StatusOK, gin.H{"messages": msgs})
 }
 
@@ -344,6 +412,15 @@ func (h *Handler) removeReaction(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
 		return
 	}
+	// Mirror addReaction's gate: a user can't poke at reactions on a
+	// message in a conversation they don't belong to. Without this, the
+	// endpoint becomes a probe for "does message X exist with reaction
+	// Y from me" (204 vs 500) — a small but unnecessary information leak.
+	ok, err := h.repo.IsMember(c.Request.Context(), convID, uid)
+	if err != nil || !ok {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 20043, "message": "not a member"})
+		return
+	}
 	if _, err := h.repo.RemoveReaction(c.Request.Context(), mid, uid, emoji); err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
 		return
@@ -369,6 +446,55 @@ func (h *Handler) broadcastReactionUpdate(c *gin.Context, convID string, msgID i
 
 // --- pins --------------------------------------------------------------
 
+// maxPinsPerConv caps how many messages can sit on the pin shelf for a
+// single conversation. Beyond this the pin button on the client fails
+// politely with 20055; admins should unpin something stale first. The
+// goal is to keep the pin tray usable as a UI element, not to let one
+// chatty group accumulate thousands of bookmarks.
+const maxPinsPerConv = 50
+
+// canManagePin reports whether the caller is allowed to pin / unpin in
+// the given conversation. Rules per conv type:
+//   - private DMs (p_*): either member may pin. Pinned messages are
+//     symmetric anyway, both parties see them.
+//   - groups (g_*) / channels (c_*): owner or admin role required.
+//     Members shouldn't be able to spam-pin or rage-unpin admin pins.
+//
+// Returns (allowed, err). err is non-nil only on DB failure.
+func (h *Handler) canManagePin(c *gin.Context, convID string, uid int64) (bool, error) {
+	ctx := c.Request.Context()
+	switch {
+	case strings.HasPrefix(convID, "p_"):
+		// Private DM: either side may pin. IsMember already gates entry.
+		return true, nil
+	case strings.HasPrefix(convID, "g_"):
+		gid, err := strconv.ParseInt(strings.TrimPrefix(convID, "g_"), 10, 64)
+		if err != nil {
+			return false, err
+		}
+		role, err := h.groups.GetMemberRole(ctx, gid, uid)
+		if err != nil {
+			return false, nil
+		}
+		return role >= 1, nil
+	case strings.HasPrefix(convID, "c_"):
+		cid, err := strconv.ParseInt(strings.TrimPrefix(convID, "c_"), 10, 64)
+		if err != nil {
+			return false, err
+		}
+		gid, err := h.channels.GroupOf(ctx, cid)
+		if err != nil {
+			return false, nil
+		}
+		role, err := h.groups.GetMemberRole(ctx, gid, uid)
+		if err != nil {
+			return false, nil
+		}
+		return role >= 1, nil
+	}
+	return false, nil
+}
+
 func (h *Handler) pin(c *gin.Context) {
 	uid := c.MustGet("userID").(int64)
 	mid, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -388,6 +514,20 @@ func (h *Handler) pin(c *gin.Context) {
 	ok, err := h.repo.IsMember(c.Request.Context(), convID, uid)
 	if err != nil || !ok {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 20052, "message": "not a member"})
+		return
+	}
+	allowed, err := h.canManagePin(c, convID, uid)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	if !allowed {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 20056, "message": "需要管理员或群主权限"})
+		return
+	}
+	// Enforce per-conv pin cap so a single conv can't hoard the table.
+	if n, err := h.repo.CountPins(c.Request.Context(), convID); err == nil && n >= maxPinsPerConv {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"code": 20055, "message": "已达置顶上限，请先取消其它再试"})
 		return
 	}
 	switch err := h.repo.Pin(c.Request.Context(), convID, mid, uid); {
@@ -427,6 +567,15 @@ func (h *Handler) unpin(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 20052, "message": "not a member"})
 		return
 	}
+	allowed, err := h.canManagePin(c, convID, uid)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	if !allowed {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 20056, "message": "需要管理员或群主权限"})
+		return
+	}
 	if err := h.repo.Unpin(c.Request.Context(), convID, mid); err != nil {
 		if errors.Is(err, ErrNotPinned) {
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 20054, "message": "not pinned"})
@@ -464,6 +613,8 @@ func (h *Handler) listPins(c *gin.Context) {
 		}
 	}
 	_, _ = h.repo.AttachReactions(c.Request.Context(), msgs)
+	// Mirror /messages — recalled pinned snapshots lose their body too.
+	RedactRecalled(msgs)
 	c.JSON(http.StatusOK, gin.H{"pins": pins})
 }
 

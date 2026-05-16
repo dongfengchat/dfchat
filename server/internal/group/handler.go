@@ -24,11 +24,17 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	g := rg.Group("/groups")
 	g.Use(middleware.RequireAuth(h.issuer))
 	g.GET("", h.listMine)
-	g.POST("", h.create)
+	// Per-user strict limit on the write paths most prone to abuse:
+	//   - POST   /groups        — mass group creation (spam)
+	//   - POST   /groups/join   — invite-code enumeration / probing
+	// 1 r/s sustained, burst 3 (matches the rest of the strict tier).
+	strict := g.Group("")
+	strict.Use(middleware.RateLimitPerUser(1, 3))
+	strict.POST("", h.create)
+	strict.POST("/join", h.join)
 	g.GET("/:id", h.detail)
 	g.PATCH("/:id", h.update)
 	g.GET("/:id/members", h.members)
-	g.POST("/join", h.join)
 	g.DELETE("/:id/leave", h.leave)
 	g.PATCH("/:id/members/:userId/role", h.setMemberRole)
 	g.DELETE("/:id/members/:userId", h.kickMember)

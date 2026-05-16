@@ -286,6 +286,16 @@ func (r *Repo) SummariseReactions(ctx context.Context, msgID int64) ([]ReactionC
 
 // Pin / Unpin / list ----------------------------------------------------
 
+// CountPins returns how many pinned messages the conversation currently
+// has. The caller uses this to enforce a per-conv cap so a chatty group
+// can't accumulate thousands of pins.
+func (r *Repo) CountPins(ctx context.Context, convID string) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM message_pins WHERE conversation_id = $1`, convID).Scan(&n)
+	return n, err
+}
+
 func (r *Repo) Pin(ctx context.Context, convID string, msgID, byUserID int64) error {
 	tag, err := r.pool.Exec(ctx,
 		`INSERT INTO message_pins (conversation_id, message_id, pinned_by)
@@ -397,6 +407,7 @@ func (r *Repo) IsMember(ctx context.Context, convID string, userID int64) (bool,
 	}
 	return n == 1, nil
 }
+
 
 // ListAfter returns messages with seq > afterSeq, oldest-first, up to limit.
 // Used for catch-up after a client reconnects.

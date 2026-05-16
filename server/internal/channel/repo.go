@@ -142,6 +142,16 @@ func (r *Repo) Delete(ctx context.Context, id int64) error {
 	return tx.Commit(ctx)
 }
 
+// GroupOf returns the group_id that owns the given channel. Used by the
+// message handler to authorize cross-channel operations (like pinning,
+// which requires admin-or-owner role on the parent group).
+func (r *Repo) GroupOf(ctx context.Context, channelID int64) (int64, error) {
+	var gid int64
+	err := r.pool.QueryRow(ctx,
+		`SELECT group_id FROM channels WHERE id = $1`, channelID).Scan(&gid)
+	return gid, err
+}
+
 // MemberIDs returns the user IDs that are conversation_members of this channel.
 func (r *Repo) MemberIDs(ctx context.Context, channelID int64) ([]int64, error) {
 	rows, err := r.pool.Query(ctx,

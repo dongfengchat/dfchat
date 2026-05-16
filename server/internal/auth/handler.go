@@ -21,7 +21,10 @@ import (
 )
 
 var (
-	usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`)
+	// Username: 5-32 chars, letters/digits/underscore. Bumped from 3
+	// to 5 because 3-char names are mostly squatters or low-effort
+	// throwaways, and 5 leaves room for "alice"-style real names.
+	usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_]{5,32}$`)
 	emailRe    = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
 
 	// Reserved usernames — keep impostor accounts off well-known names.
@@ -459,26 +462,25 @@ type registerReq struct {
 func (h *Handler) register(c *gin.Context) {
 	var req registerReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, http.StatusBadRequest, 10010, "invalid request body")
+		fail(c, http.StatusBadRequest, 10010, "请求格式错误")
 		return
 	}
 	if !usernameRe.MatchString(req.Username) {
-		fail(c, http.StatusBadRequest, 10011, "username must be 3-32 chars, letters/digits/underscore")
+		fail(c, http.StatusBadRequest, 10011, "用户名须为 5-32 位字母 / 数字 / 下划线")
 		return
 	}
 	if _, reserved := reservedUsernames[strings.ToLower(req.Username)]; reserved {
-		fail(c, http.StatusBadRequest, 10016, "username is reserved")
+		fail(c, http.StatusBadRequest, 10016, "用户名被系统保留，请换一个")
 		return
 	}
 	// `deleted_<n>` is what SoftDelete rewrites usernames to. Letting people
-	// squat it would block legitimate account-deletion flows when their id
-	// hashes to a colliding number.
+	// squat it would block legitimate account-deletion flows.
 	if strings.HasPrefix(strings.ToLower(req.Username), "deleted_") {
-		fail(c, http.StatusBadRequest, 10016, "username is reserved")
+		fail(c, http.StatusBadRequest, 10016, "用户名被系统保留，请换一个")
 		return
 	}
 	if !emailRe.MatchString(req.Email) || len(req.Email) > 128 {
-		fail(c, http.StatusBadRequest, 10012, "invalid email")
+		fail(c, http.StatusBadRequest, 10012, "邮箱格式不正确")
 		return
 	}
 	if isDisposableEmail(req.Email) {
@@ -486,11 +488,11 @@ func (h *Handler) register(c *gin.Context) {
 		return
 	}
 	if len(req.Password) < 8 {
-		fail(c, http.StatusBadRequest, 10013, "password must be at least 8 characters")
+		fail(c, http.StatusBadRequest, 10013, "密码至少 8 位")
 		return
 	}
 	if len(req.Password) > maxPasswordBytes {
-		fail(c, http.StatusBadRequest, 10017, "password too long (max 72 bytes)")
+		fail(c, http.StatusBadRequest, 10017, "密码过长（最多 72 字节）")
 		return
 	}
 	if msg := validatePassword(req.Password); msg != "" {
@@ -498,20 +500,20 @@ func (h *Handler) register(c *gin.Context) {
 		return
 	}
 	if len(req.Nickname) > 64 {
-		fail(c, http.StatusBadRequest, 10018, "nickname too long (max 64 chars)")
+		fail(c, http.StatusBadRequest, 10018, "昵称过长（最多 64 字符）")
 		return
 	}
 
 	u, err := h.svc.Register(c.Request.Context(), RegisterInput(req))
 	switch {
 	case errors.Is(err, ErrUsernameTaken):
-		fail(c, http.StatusConflict, 10014, "username already taken")
+		fail(c, http.StatusConflict, 10014, "用户名已被注册")
 		return
 	case errors.Is(err, ErrEmailTaken):
-		fail(c, http.StatusConflict, 10015, "email already registered")
+		fail(c, http.StatusConflict, 10015, "邮箱已被注册")
 		return
 	case err != nil:
-		fail(c, http.StatusInternalServerError, 50001, "internal error")
+		fail(c, http.StatusInternalServerError, 50001, "服务器内部错误")
 		return
 	}
 
