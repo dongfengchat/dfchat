@@ -720,6 +720,51 @@
   .signup-card .msg { font-size: 13px; margin-top: 14px; padding: 10px 12px; border-radius: 10px; display: none; }
   .signup-card .msg.error { display: block; color: #ed4245; background: rgba(237,66,69,0.10); border: 1px solid rgba(237,66,69,0.35); }
   .signup-card .msg.success { display: block; color: var(--accent-green); background: rgba(59,165,92,0.10); border: 1px solid rgba(59,165,92,0.40); }
+  .signup-card .hint { font-size: 11px; color: var(--ink-4); margin-top: 4px; }
+  .signup-card .hint.bad { color: #ed4245; }
+  .signup-card .hint.ok { color: var(--accent-green); }
+  /* ===== Account-number picker ===== */
+  .num-grid {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px;
+    margin-bottom: 12px;
+  }
+  .num-cell {
+    padding: 11px 0; text-align: center;
+    border-radius: 10px; background: var(--bg-4);
+    border: 1px solid rgba(58,65,80,0.6);
+    color: var(--ink-2); font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 14px; letter-spacing: 0.04em;
+    cursor: pointer; user-select: none;
+    transition: all .15s ease;
+  }
+  .num-cell:hover { border-color: var(--brand-500); background: var(--bg-3); }
+  .num-cell.active {
+    background: var(--brand-500); border-color: var(--brand-500);
+    color: #fff; transform: scale(1.03);
+    box-shadow: 0 4px 14px rgba(72,105,247,0.35);
+  }
+  .num-cell.loading { color: var(--ink-4); }
+  .picker-row {
+    display: flex; gap: 8px; align-items: center;
+    margin-bottom: 12px;
+  }
+  .picker-row .refresh-btn {
+    flex: 1; padding: 9px; border-radius: 10px;
+    background: var(--bg-4); border: 1px solid rgba(58,65,80,0.6);
+    color: var(--ink-2); cursor: pointer; font-size: 13px;
+  }
+  .picker-row .refresh-btn:hover:not(:disabled) { border-color: var(--brand-500); }
+  .picker-row .refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .picker-note {
+    font-size: 11px; color: var(--ink-4); text-align: center;
+    margin-bottom: 18px; padding-top: 8px;
+    border-top: 1px solid rgba(58,65,80,0.4);
+  }
+  @media (max-width: 480px) {
+    .num-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  /* Lock the rest of the form until a number is picked */
+  .signup-card .form-fields[data-locked="1"] { opacity: 0.4; pointer-events: none; filter: blur(0.3px); }
 
   /* ===== Footer ===== */
   footer {
@@ -1235,25 +1280,49 @@
   <div class="container">
     <div class="signup-card">
       <h2 class="reveal">免费注册</h2>
-      <p class="muted">不需要手机号。注册完登录客户端即可。</p>
+      <p class="muted">先挑一个号码 · 再填资料 · 不需要手机号</p>
       <form id="reg-form" autocomplete="off">
+        <!-- Step 1: pick a number -->
         <div class="field">
-          <label>用户名 <span class="muted">（3-32 位字母数字下划线）</span></label>
-          <input name="username" maxlength="32" required pattern="[A-Za-z0-9_]{3,32}" placeholder="alice" />
+          <label>🎲 选择你的账号 <span class="muted" id="picker-status">正在摇号…</span></label>
+          <div class="num-grid" id="num-grid">
+            <!-- 10 cells populated by JS -->
+          </div>
+          <div class="picker-row">
+            <button type="button" class="refresh-btn" id="refresh-btn" disabled>换一批</button>
+          </div>
+          <div class="picker-note">
+            选中后才能填写注册资料 · 号码 10 分钟内有效
+          </div>
         </div>
-        <div class="field">
-          <label>邮箱</label>
-          <input name="email" type="email" required placeholder="you@example.com" />
+
+        <!-- Step 2: form (locked until a number is picked) -->
+        <div class="form-fields" id="form-fields" data-locked="1">
+          <div class="field">
+            <label>用户名 <span class="muted">（5-32 位字母数字下划线）</span></label>
+            <input name="username" maxlength="32" required pattern="[A-Za-z0-9_]{5,32}" placeholder="alice123" />
+          </div>
+          <div class="field">
+            <label>邮箱</label>
+            <input name="email" type="email" required placeholder="you@gmail.com" />
+            <div class="hint">用于接收验证邮件 · 一次性邮箱不被允许</div>
+          </div>
+          <div class="field">
+            <label>昵称 <span class="muted">（可选，默认与用户名相同）</span></label>
+            <input name="nickname" maxlength="64" placeholder="" />
+          </div>
+          <div class="field">
+            <label>密码 <span class="muted">（8–72 位，需混合字母数字或符号）</span></label>
+            <input name="password" type="password" minlength="8" maxlength="72" required placeholder="••••••••" />
+            <div class="hint" id="pw-hint">至少 8 位，且不只是字母或数字</div>
+          </div>
+          <div class="field">
+            <label>确认密码</label>
+            <input name="confirmPassword" type="password" minlength="8" maxlength="72" required placeholder="再输一遍" />
+            <div class="hint" id="confirm-hint">为防止手误，需要再输一遍</div>
+          </div>
+          <button type="submit" class="btn btn-primary" id="reg-submit" disabled>请先选择账号</button>
         </div>
-        <div class="field">
-          <label>昵称 <span class="muted">（可选，默认与用户名相同）</span></label>
-          <input name="nickname" maxlength="64" placeholder="" />
-        </div>
-        <div class="field">
-          <label>密码 <span class="muted">（至少 8 位）</span></label>
-          <input name="password" type="password" minlength="8" required placeholder="••••••••" />
-        </div>
-        <button type="submit" class="btn btn-primary">注册并下载客户端</button>
         <div class="msg" id="reg-msg"></div>
       </form>
     </div>
@@ -1316,15 +1385,172 @@
     }
   })();
 
-  // ----- Inline register form -----
-  const form = document.getElementById('reg-form');
-  const msg  = document.getElementById('reg-msg');
+  // ============================================================
+  // Inline register: account-number picker + form
+  // ============================================================
+  const form        = document.getElementById('reg-form');
+  const msg         = document.getElementById('reg-msg');
+  const grid        = document.getElementById('num-grid');
+  const refreshBtn  = document.getElementById('refresh-btn');
+  const pickerStat  = document.getElementById('picker-status');
+  const formFields  = document.getElementById('form-fields');
+  const submitBtn   = document.getElementById('reg-submit');
+  const pwInput     = form.querySelector('input[name="password"]');
+  const confirmIn   = form.querySelector('input[name="confirmPassword"]');
+  const emailInput  = form.querySelector('input[name="email"]');
+  const pwHint      = document.getElementById('pw-hint');
+  const confirmHint = document.getElementById('confirm-hint');
+
+  let selectionToken = '';
+  let refreshesLeft  = 0;
+  let pickedNo       = null;
+
+  const DISPOSABLE = new Set([
+    'mailinator.com','10minutemail.com','guerrillamail.com','yopmail.com',
+    'tempmail.com','temp-mail.org','throwawaymail.com','trashmail.com',
+    'sharklasers.com','maildrop.cc','getnada.com','dispostable.com',
+    'example.com','example.org','example.net',
+  ]);
+
+  function renderGrid(nums) {
+    grid.innerHTML = '';
+    nums.forEach((n) => {
+      const cell = document.createElement('div');
+      cell.className = 'num-cell';
+      cell.textContent = n;
+      cell.addEventListener('click', () => {
+        pickedNo = n;
+        Array.from(grid.children).forEach((c) => c.classList.remove('active'));
+        cell.classList.add('active');
+        formFields.dataset.locked = '0';
+        updateSubmitButton();
+      });
+      grid.appendChild(cell);
+    });
+  }
+
+  function setRefreshButton(label, disabled) {
+    refreshBtn.textContent = label;
+    refreshBtn.disabled = disabled;
+  }
+
+  async function doDraw() {
+    setRefreshButton('正在摇号…', true);
+    pickerStat.textContent = '正在摇号…';
+    try {
+      const res = await fetch(API + '/api/v1/auth/account-no/draw', { method: 'POST' });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.message || ('摇号失败 HTTP ' + res.status));
+      selectionToken = body.selectionToken;
+      refreshesLeft  = body.refreshesLeft;
+      pickedNo = null;
+      formFields.dataset.locked = '1';
+      renderGrid(body.numbers);
+      pickerStat.textContent = '从下面 10 个里挑一个';
+      setRefreshButton('换一批（还可换 ' + refreshesLeft + ' 次）', refreshesLeft <= 0);
+      updateSubmitButton();
+    } catch (e) {
+      pickerStat.textContent = '获取号码失败';
+      grid.innerHTML = '<div class="num-cell loading" style="grid-column: 1 / -1;">摇号失败：' + (e.message || e) + ' · 点击重试</div>';
+      grid.querySelector('.num-cell').addEventListener('click', doDraw);
+      setRefreshButton('重试', false);
+    }
+  }
+
+  async function doRefresh() {
+    if (!selectionToken || refreshesLeft <= 0) return;
+    setRefreshButton('换一批中…', true);
+    try {
+      const res = await fetch(API + '/api/v1/auth/account-no/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selectionToken }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.message || ('刷新失败 HTTP ' + res.status));
+      refreshesLeft = body.refreshesLeft;
+      pickedNo = null;
+      formFields.dataset.locked = '1';
+      renderGrid(body.numbers);
+      setRefreshButton(refreshesLeft > 0 ? '换一批（还可换 ' + refreshesLeft + ' 次）' : '换一批已用完', refreshesLeft <= 0);
+      updateSubmitButton();
+    } catch (e) {
+      msg.className = 'msg error';
+      msg.textContent = e.message || ('刷新失败：' + e);
+      setRefreshButton('换一批', refreshesLeft <= 0);
+    }
+  }
+
+  refreshBtn.addEventListener('click', doRefresh);
+
+  // Live password / confirm-password hints
+  function checkPwLive() {
+    const pw = pwInput.value;
+    if (pw.length === 0) {
+      pwHint.textContent = '至少 8 位，且不只是字母或数字'; pwHint.className = 'hint';
+      return false;
+    }
+    if (pw.length < 8) { pwHint.textContent = '密码至少 8 位（还差 ' + (8 - pw.length) + ' 位）'; pwHint.className = 'hint bad'; return false; }
+    if (pw.length > 72) { pwHint.textContent = '密码过长，最多 72 字节'; pwHint.className = 'hint bad'; return false; }
+    let hasD = false, hasL = false, hasS = false;
+    for (const c of pw) {
+      if (/\d/.test(c)) hasD = true;
+      else if (/[a-zA-Z]/.test(c)) hasL = true;
+      else hasS = true;
+    }
+    const classes = (hasD ? 1 : 0) + (hasL ? 1 : 0) + (hasS ? 1 : 0);
+    if (classes < 2) { pwHint.textContent = '需要混合至少两种：字母 / 数字 / 符号'; pwHint.className = 'hint bad'; return false; }
+    pwHint.textContent = '✓ 密码强度合格'; pwHint.className = 'hint ok';
+    return true;
+  }
+  function checkConfirmLive() {
+    if (!confirmIn.value) { confirmHint.textContent = '为防止手误，需要再输一遍'; confirmHint.className = 'hint'; return false; }
+    if (confirmIn.value !== pwInput.value) { confirmHint.textContent = '两次密码不一致'; confirmHint.className = 'hint bad'; return false; }
+    confirmHint.textContent = '✓ 两次密码一致'; confirmHint.className = 'hint ok';
+    return true;
+  }
+  function updateSubmitButton() {
+    if (pickedNo === null) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = '请先选择账号';
+      return;
+    }
+    submitBtn.disabled = false;
+    submitBtn.textContent = '注册账号 ' + pickedNo;
+  }
+  pwInput.addEventListener('input', () => { checkPwLive(); checkConfirmLive(); });
+  confirmIn.addEventListener('input', checkConfirmLive);
+  emailInput.addEventListener('blur', () => {
+    const v = emailInput.value.trim();
+    if (!v) return;
+    const domain = (v.split('@').pop() || '').toLowerCase();
+    if (DISPOSABLE.has(domain)) {
+      msg.className = 'msg error';
+      msg.textContent = '不接受一次性邮箱，请用真实邮箱（Gmail / QQ / 网易等）';
+    } else {
+      msg.className = 'msg'; msg.textContent = '';
+    }
+  });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     msg.className = 'msg';
     msg.textContent = '';
+
+    if (pickedNo === null) {
+      msg.className = 'msg error'; msg.textContent = '请先选择一个账号'; return;
+    }
+    if (!checkPwLive()) { msg.className = 'msg error'; msg.textContent = pwHint.textContent; return; }
+    if (!checkConfirmLive()) { msg.className = 'msg error'; msg.textContent = confirmHint.textContent; return; }
+
     const data = Object.fromEntries(new FormData(form));
     if (!data.nickname) data.nickname = data.username;
+    delete data.confirmPassword; // server doesn't want it
+    data.accountNo = pickedNo;
+    data.selectionToken = selectionToken;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = '注册中…';
     try {
       const res = await fetch(API + '/api/v1/auth/register', {
         method: 'POST',
@@ -1335,19 +1561,44 @@
       if (!res.ok) {
         msg.classList.add('error');
         msg.textContent = body.message || ('注册失败 HTTP ' + res.status);
+        // If the chosen number was snatched mid-flight, re-draw.
+        if (body.code === 10094 || body.code === 10091 || body.code === 10095) {
+          await doDraw();
+        } else {
+          submitBtn.disabled = false;
+          submitBtn.textContent = '注册账号 ' + pickedNo;
+        }
         return;
       }
       msg.classList.add('success');
-      msg.textContent = '注册成功！现在请下载客户端登录。';
-      form.querySelector('button').textContent = '✓ 已注册';
+      msg.textContent = '✓ 注册成功！你的账号是 ' + body.user.accountNo + '。请下载客户端并用账号 + 密码登录，邮箱里会收到验证链接。';
+      submitBtn.textContent = '✓ 已注册';
       setTimeout(() => {
         document.getElementById('download').scrollIntoView({ behavior: 'smooth' });
-      }, 800);
+      }, 1200);
     } catch (err) {
       msg.classList.add('error');
       msg.textContent = '网络错误，请检查连接：' + (err.message || err);
+      submitBtn.disabled = false;
+      submitBtn.textContent = '注册账号 ' + pickedNo;
     }
   });
+
+  // Kick off the first draw as soon as the user scrolls within ~600px of
+  // the signup card — saves draw resources on visitors who never look.
+  let drawn = false;
+  function maybeDraw() {
+    if (drawn) return;
+    const rect = document.getElementById('signup').getBoundingClientRect();
+    if (rect.top < window.innerHeight + 600) {
+      drawn = true;
+      doDraw();
+      window.removeEventListener('scroll', maybeDraw);
+    }
+  }
+  window.addEventListener('scroll', maybeDraw, { passive: true });
+  // If signup is already visible on load, fire immediately.
+  maybeDraw();
 </script>
 
 <!-- ============================================================
