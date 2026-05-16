@@ -694,6 +694,17 @@ export async function sendVerificationEmail(): Promise<{ ok: boolean; alreadyVer
   } catch (e) { throw unwrapError(e); }
 }
 
+// requestEmailChange queues a change of the registered email. The user
+// must re-enter their current password (defence against open-session
+// hijack), and the new mailbox must click a confirmation link before the
+// swap takes effect. Returns dev-mode link when SMTP isn't configured.
+export async function requestEmailChange(newEmail: string, currentPassword: string): Promise<{ ok: boolean; devLink?: string }> {
+  try {
+    const res = await api.post<{ ok: boolean; devLink?: string }>('/api/v1/auth/request-email-change', { newEmail, currentPassword });
+    return res.data;
+  } catch (e) { throw unwrapError(e); }
+}
+
 export async function adminSetUserStatus(userId: string, status: number): Promise<void> {
   try {
     await api.patch(`/api/v1/admin/users/${userId}/status`, { status });

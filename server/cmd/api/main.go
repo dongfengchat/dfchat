@@ -108,6 +108,9 @@ func main() {
 	liveHandler.AttachViewerSource(realtimeHandler)
 	// Background goroutine pushes reminders 0-10 min before scheduled streams.
 	liveHandler.RunScheduledReminderLoop(ctx)
+	// Background sweeper: drops unverified accounts > 14 days old and GCs
+	// expired email-verify / password-reset tokens. Runs hourly.
+	go auth.RunCleanupLoop(ctx, pool, log)
 	turnHandler := turn.NewHandler(issuer, turn.Config{
 		Secret:     cfg.TurnSecret,
 		Host:       cfg.TurnHost,

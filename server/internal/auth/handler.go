@@ -67,6 +67,8 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	// Email verification — the GET is public (link clicked from inbox);
 	// the POST to resend is authenticated.
 	rg.GET("/auth/verify-email", h.verifyEmail)
+	// Email change confirm — public (link clicked from new inbox).
+	rg.GET("/auth/confirm-email-change", h.confirmEmailChange)
 	// Session management — guarded by access-token auth.
 	guarded := rg.Group("/auth")
 	guarded.Use(middleware.RequireAuth(h.issuer))
@@ -76,6 +78,7 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	guarded.POST("/change-password", h.changePassword)
 	guarded.POST("/sessions/revoke-others", h.revokeOthers)
 	guarded.POST("/send-verification", h.sendVerification)
+	guarded.POST("/request-email-change", h.requestEmailChange)
 }
 
 // ============= Email verification + Password reset ==============
@@ -172,6 +175,155 @@ func (h *Handler) verifyEmail(c *gin.Context) {
 	c.String(http.StatusOK, "✅ 邮箱验证成功！可以回到 DFCHAT 客户端继续使用。")
 }
 
+// ===== Email change (with double-confirmation) =====
+
+type requestEmailChangeReq struct {
+	NewEmail        string `json:"newEmail"`
+	CurrentPassword string `json:"currentPassword"`
+}
+
+// requestEmailChange (authed) starts an email change. We never update
+// users.email here — instead we mail the *new* address with a one-shot
+// confirmation link. Only after that link is clicked does the actual
+// swap happen, proving ownership of the new mailbox.
+//
+// Re-entering the current password is required even though the user is
+// already authenticated. This guards against the "stolen laptop / open
+// session" scenario where someone with bearer access could otherwise
+// quietly hijack the account by changing the email.
+func (h *Handler) requestEmailChange(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	var req requestEmailChangeReq
+	if err := c.ShouldBindJSON(&req); err != nil || req.NewEmail == "" || req.CurrentPassword == "" {
+		fail(c, http.StatusBadRequest, 10080, "newEmail + currentPassword required")
+		return
+	}
+	newEmail := strings.ToLower(strings.TrimSpace(req.NewEmail))
+	if !emailRe.MatchString(newEmail) || len(newEmail) > 128 {
+		fail(c, http.StatusBadRequest, 10081, "invalid email")
+		return
+	}
+	if isDisposableEmail(newEmail) {
+		fail(c, http.StatusBadRequest, 10082, "请使用真实邮箱，一次性邮箱不被允许")
+		return
+	}
+
+	// Re-confirm current password before allowing the change.
+	var currentEmail, passwordHash string
+	err := h.pool.QueryRow(c.Request.Context(),
+		`SELECT email, password_hash FROM users WHERE id = $1`, uid).Scan(&currentEmail, &passwordHash)
+	if err != nil {
+		fail(c, http.StatusNotFound, 10010, "user not found")
+		return
+	}
+	if newEmail == currentEmail {
+		fail(c, http.StatusBadRequest, 10083, "新邮箱不能和当前邮箱相同")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.CurrentPassword)); err != nil {
+		fail(c, http.StatusUnauthorized, 10084, "当前密码错误")
+		return
+	}
+
+	// Don't leak whether the target email is already taken — we still
+	// queue the request silently. The actual swap step will fail safely
+	// because users.email is UNIQUE; the attacker just sees a "click the
+	// link" message that never works. But we DO check up front and quietly
+	// no-op the mail if so — saves a wasted SMTP send.
+	var collision int
+	_ = h.pool.QueryRow(c.Request.Context(),
+		`SELECT 1 FROM users WHERE email = $1 AND id <> $2`, newEmail, uid).Scan(&collision)
+	if collision == 1 {
+		// Silent OK to avoid email-enumeration probing.
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+		return
+	}
+
+	// 60s cooldown to prevent spam.
+	var lastIssued time.Time
+	_ = h.pool.QueryRow(c.Request.Context(),
+		`SELECT created_at FROM email_change_requests WHERE user_id = $1
+		 ORDER BY created_at DESC LIMIT 1`, uid).Scan(&lastIssued)
+	if !lastIssued.IsZero() && time.Since(lastIssued) < 60*time.Second {
+		fail(c, http.StatusTooManyRequests, 10085, "请求过于频繁，请 1 分钟后再试")
+		return
+	}
+
+	tok, err := newToken()
+	if err != nil {
+		fail(c, http.StatusInternalServerError, 50001, "internal error")
+		return
+	}
+	expiresAt := time.Now().Add(60 * time.Minute)
+	if _, err := h.pool.Exec(c.Request.Context(),
+		`INSERT INTO email_change_requests (token, user_id, new_email, expires_at) VALUES ($1, $2, $3, $4)`,
+		tok, uid, newEmail, expiresAt); err != nil {
+		fail(c, http.StatusInternalServerError, 50001, "internal error")
+		return
+	}
+
+	apiBase := strings.Replace(strings.TrimRight(h.publicBaseURL, "/"), "://", "://app.", 1)
+	link := fmt.Sprintf("%s/api/v1/auth/confirm-email-change?token=%s", apiBase, tok)
+	body := fmt.Sprintf("你好，\n\n收到了将 DFCHAT 账号邮箱改为这个地址的请求。点击下方链接确认（1 小时内有效）：\n\n%s\n\n如果不是你本人操作，请忽略此邮件；当前邮箱不会被改变。\n\n— DFCHAT", link)
+	_ = h.mailer.Send(newEmail, "确认 DFCHAT 邮箱变更", body)
+
+	resp := gin.H{"ok": true}
+	if !h.mailer.Enabled() {
+		resp["devLink"] = link
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// confirmEmailChange (public) processes the link the new mailbox got.
+// Single-atomic CTE: deletes the token if valid and not expired, returns
+// (user_id, new_email), then updates users.email with the new value AND
+// flips email_verified=true (since they just proved ownership). The
+// UNIQUE constraint on users.email protects against races where the new
+// address got taken between request and confirm — we surface a clear
+// error message.
+func (h *Handler) confirmEmailChange(c *gin.Context) {
+	tok := c.Query("token")
+	if tok == "" {
+		c.String(http.StatusBadRequest, "缺少 token 参数")
+		return
+	}
+
+	var uid int64
+	var newEmail string
+	err := h.pool.QueryRow(c.Request.Context(), `
+		DELETE FROM email_change_requests
+		WHERE token = $1 AND expires_at > now()
+		RETURNING user_id, new_email`, tok).Scan(&uid, &newEmail)
+	if errors.Is(err, pgx.ErrNoRows) {
+		c.String(http.StatusBadRequest, "确认链接无效、已使用或已过期。请回到客户端重新申请。")
+		return
+	}
+	if err != nil {
+		c.String(http.StatusInternalServerError, "内部错误")
+		return
+	}
+
+	// Try the swap. If the target email was taken in the meantime,
+	// users.email UNIQUE constraint raises 23505 (pgx pgconn error).
+	tag, err := h.pool.Exec(c.Request.Context(),
+		`UPDATE users SET email = $1, email_verified = true WHERE id = $2`, newEmail, uid)
+	if err != nil {
+		c.String(http.StatusConflict, "这个邮箱已被另一个账号占用，请换一个再试。")
+		return
+	}
+	if tag.RowsAffected() != 1 {
+		c.String(http.StatusInternalServerError, "更新失败，请重试")
+		return
+	}
+	// Belt-and-suspenders: any other outstanding requests for this user
+	// (e.g. the user clicked "change" twice with different addresses) are
+	// now stale.
+	_, _ = h.pool.Exec(c.Request.Context(),
+		`DELETE FROM email_change_requests WHERE user_id = $1`, uid)
+
+	c.String(http.StatusOK, "✅ 邮箱已更新为 "+newEmail+"。回到 DFCHAT 客户端即可。")
+}
+
 type forgotPasswordReq struct {
 	Email string `json:"email"`
 }
@@ -237,6 +389,10 @@ func (h *Handler) resetPassword(c *gin.Context) {
 	}
 	if len(req.NewPassword) > maxPasswordBytes {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 10043, "message": "密码过长（最多 72 字节）"})
+		return
+	}
+	if msg := validatePassword(req.NewPassword); msg != "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 10044, "message": msg})
 		return
 	}
 
@@ -314,8 +470,19 @@ func (h *Handler) register(c *gin.Context) {
 		fail(c, http.StatusBadRequest, 10016, "username is reserved")
 		return
 	}
+	// `deleted_<n>` is what SoftDelete rewrites usernames to. Letting people
+	// squat it would block legitimate account-deletion flows when their id
+	// hashes to a colliding number.
+	if strings.HasPrefix(strings.ToLower(req.Username), "deleted_") {
+		fail(c, http.StatusBadRequest, 10016, "username is reserved")
+		return
+	}
 	if !emailRe.MatchString(req.Email) || len(req.Email) > 128 {
 		fail(c, http.StatusBadRequest, 10012, "invalid email")
+		return
+	}
+	if isDisposableEmail(req.Email) {
+		fail(c, http.StatusBadRequest, 10019, "请使用真实邮箱注册，一次性邮箱不被允许")
 		return
 	}
 	if len(req.Password) < 8 {
@@ -324,6 +491,10 @@ func (h *Handler) register(c *gin.Context) {
 	}
 	if len(req.Password) > maxPasswordBytes {
 		fail(c, http.StatusBadRequest, 10017, "password too long (max 72 bytes)")
+		return
+	}
+	if msg := validatePassword(req.Password); msg != "" {
+		fail(c, http.StatusBadRequest, 10060, msg)
 		return
 	}
 	if len(req.Nickname) > 64 {
@@ -518,6 +689,10 @@ func (h *Handler) changePassword(c *gin.Context) {
 	}
 	if len(req.NewPassword) > maxPasswordBytes {
 		fail(c, http.StatusBadRequest, 10053, "new password too long (max 72 bytes)")
+		return
+	}
+	if msg := validatePassword(req.NewPassword); msg != "" {
+		fail(c, http.StatusBadRequest, 10054, msg)
 		return
 	}
 	if err := h.svc.ChangePassword(c.Request.Context(), uid, req.CurrentPassword, req.NewPassword); err != nil {
