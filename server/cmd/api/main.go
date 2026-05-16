@@ -114,8 +114,16 @@ func main() {
 	// Background goroutine pushes reminders 0-10 min before scheduled streams.
 	liveHandler.RunScheduledReminderLoop(ctx)
 	// Background sweeper: drops unverified accounts > 14 days old and GCs
-	// expired email-verify / password-reset tokens. Runs hourly.
+	// expired email-verify / password-reset tokens / draw selections.
+	// Runs hourly.
 	go auth.RunCleanupLoop(ctx, pool, log)
+
+	// Account-number pool: populate any open segment that's missing
+	// rows. Idempotent — on warm boots this is a no-op. On the first
+	// boot after migration 000019 it generates ~10k rows in < 1s.
+	if err := auth.EnsureSegmentPools(ctx, pool, log); err != nil {
+		log.Warn("account-no: pool init failed", "err", err.Error())
+	}
 	turnHandler := turn.NewHandler(issuer, turn.Config{
 		Secret:     cfg.TurnSecret,
 		Host:       cfg.TurnHost,

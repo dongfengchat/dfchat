@@ -81,4 +81,41 @@ func sweep(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) {
 	} else if n := tag.RowsAffected(); n > 0 {
 		log.Info("auth cleanup: gc reset tokens", "count", n)
 	}
+
+	// Expired draw sessions — drop the selection row and release any
+	// numbers still listed as reserved. The reservation_until on the
+	// pool row already lapsed via TTL but we explicitly null it so the
+	// "free" index hits cleanly.
+	tag, err = pool.Exec(sctx, `
+		WITH expired AS (
+			DELETE FROM account_no_selections WHERE expires_at < now()
+			RETURNING reserved_nos
+		),
+		unioned AS (
+			SELECT DISTINCT unnest(reserved_nos) AS account_no FROM expired
+		)
+		UPDATE account_no_pool p
+		SET reserved_until = NULL
+		FROM unioned u
+		WHERE p.account_no = u.account_no
+		  AND p.claimed_user_id IS NULL`)
+	if err != nil {
+		log.Warn("auth cleanup: gc draw sessions failed", "err", err.Error())
+	} else if n := tag.RowsAffected(); n > 0 {
+		log.Info("auth cleanup: released expired draw reservations", "count", n)
+	}
+
+	// Stale orphan reservations (reserved_until in the past, no claimed
+	// user, no live selection referencing them). Belt-and-suspenders
+	// in case a selection was deleted some other way.
+	tag, err = pool.Exec(sctx, `
+		UPDATE account_no_pool SET reserved_until = NULL
+		WHERE reserved_until IS NOT NULL
+		  AND reserved_until < now()
+		  AND claimed_user_id IS NULL`)
+	if err != nil {
+		log.Warn("auth cleanup: clear stale reservations failed", "err", err.Error())
+	} else if n := tag.RowsAffected(); n > 0 {
+		log.Info("auth cleanup: cleared stale reservations", "count", n)
+	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/dongfang/dfchat/server/pkg/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -65,6 +66,11 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	strict.POST("/auth/login", h.login)
 	strict.POST("/auth/forgot-password", h.forgotPassword)
 	strict.POST("/auth/reset-password", h.resetPassword)
+	// Account-number pool endpoints — public, called before register.
+	// Strict-rate-limited because each draw atomically locks 10 numbers
+	// for 10 minutes; unlimited would let one attacker drain a segment.
+	strict.POST("/auth/account-no/draw", h.drawAccountNumbers)
+	strict.POST("/auth/account-no/refresh", h.refreshAccountNumbers)
 	// /auth/refresh is hot during normal app use — global limit is enough.
 	rg.POST("/auth/refresh", h.refresh)
 	// Email verification — the GET is public (link clicked from inbox);
@@ -468,10 +474,12 @@ func (h *Handler) resetPassword(c *gin.Context) {
 }
 
 type registerReq struct {
-	Username string `json:"username"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Nickname string `json:"nickname"`
+	Username       string `json:"username"`
+	Email          string `json:"email"`
+	Password       string `json:"password"`
+	Nickname       string `json:"nickname"`
+	AccountNo      string `json:"accountNo"`      // chosen from the draw
+	SelectionToken string `json:"selectionToken"` // proves they got it from a real draw
 }
 
 func (h *Handler) register(c *gin.Context) {
@@ -519,24 +527,90 @@ func (h *Handler) register(c *gin.Context) {
 		return
 	}
 
-	u, err := h.svc.Register(c.Request.Context(), RegisterInput(req))
-	switch {
-	case errors.Is(err, ErrUsernameTaken):
-		fail(c, http.StatusConflict, 10014, "用户名已被注册")
+	// Account number must come from a real draw — selectionToken proves
+	// the client went through /auth/account-no/draw. Anti-bot: scripted
+	// registrations have to do the same dance as the UI.
+	if req.SelectionToken == "" || req.AccountNo == "" {
+		fail(c, http.StatusBadRequest, 10093, "缺少账号选择信息，请回到注册页重新摇号")
 		return
-	case errors.Is(err, ErrEmailTaken):
-		fail(c, http.StatusConflict, 10015, "邮箱已被注册")
+	}
+	chosenNo, parseErr := parsePositiveInt(req.AccountNo)
+	if parseErr != nil {
+		fail(c, http.StatusBadRequest, 10093, "账号格式错误")
 		return
-	case err != nil:
+	}
+
+	// All the writes (user insert + pool claim + selection delete) need
+	// to be atomic, so we run them inside a single tx.
+	ctx := c.Request.Context()
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, 50001, "服务器内部错误")
+		return
+	}
+	nickname := req.Nickname
+	if nickname == "" {
+		nickname = req.Username
+	}
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, 50001, "服务器内部错误")
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var u userInsertResult
+	err = tx.QueryRow(ctx, `
+		INSERT INTO users (username, email, password_hash, nickname, account_no)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, account_no, username, email, nickname,
+		          COALESCE(avatar_url, ''), COALESCE(bio, ''),
+		          status, email_verified, is_admin, created_at`,
+		req.Username, email, string(hash), nickname, chosenNo,
+	).Scan(&u.ID, &u.AccountNo, &u.Username, &u.Email, &u.Nickname,
+		&u.AvatarURL, &u.Bio, &u.Status, &u.EmailVerified, &u.IsAdmin, &u.CreatedAt)
+	if err != nil {
+		switch detectUniqueViolation(err) {
+		case "username":
+			fail(c, http.StatusConflict, 10014, "用户名已被注册")
+			return
+		case "email":
+			fail(c, http.StatusConflict, 10015, "邮箱已被注册")
+			return
+		case "account_no":
+			fail(c, http.StatusConflict, 10094, "这个账号刚被别人选走了，请回到注册页换一个")
+			return
+		}
+		fail(c, http.StatusInternalServerError, 50001, "服务器内部错误")
+		return
+	}
+
+	// Cross-check the selection (must contain this number, IP must match,
+	// not expired), mark the pool row claimed, release the 9 siblings,
+	// drop the selection row.
+	if err := validateAndConsumeSelection(ctx, tx, c.ClientIP(), req.SelectionToken, chosenNo, u.ID); err != nil {
+		switch {
+		case errors.Is(err, errSelectionInvalid):
+			fail(c, http.StatusBadRequest, 10091, "会话已失效，请回到注册页重新摇号")
+		case errors.Is(err, errChosenNotInSelection):
+			fail(c, http.StatusBadRequest, 10095, "你选的账号不在本次摇号结果里")
+		case errors.Is(err, errChosenAlreadyClaimed):
+			fail(c, http.StatusConflict, 10094, "这个账号刚被别人选走了，请回到注册页换一个")
+		default:
+			fail(c, http.StatusInternalServerError, 50001, "服务器内部错误")
+		}
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
 		fail(c, http.StatusInternalServerError, 50001, "服务器内部错误")
 		return
 	}
 
 	// Auto-send the verification email. Done in a goroutine so registration
-	// returns immediately even on slow SMTP — the worst case for the user
-	// is a 1-2s wait on the resend button (60s server cooldown protects
-	// against duplicate-send races). Detached ctx since request ctx is
-	// cancelled when we return below.
+	// returns immediately even on slow SMTP. Detached ctx since request
+	// ctx is cancelled when we return below.
 	go func(uid int64, email string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -544,6 +618,44 @@ func (h *Handler) register(c *gin.Context) {
 	}(u.ID, u.Email)
 
 	c.JSON(http.StatusCreated, gin.H{"user": u})
+}
+
+// userInsertResult mirrors user.User's JSON shape without pulling in
+// the import — keeps the handler self-contained. The fields use the
+// same json tags so the response looks identical to the old flow.
+type userInsertResult struct {
+	ID            int64     `json:"id,string"`
+	AccountNo     int64     `json:"accountNo,string"`
+	Username      string    `json:"username"`
+	Email         string    `json:"email"`
+	Nickname      string    `json:"nickname"`
+	AvatarURL     string    `json:"avatarUrl,omitempty"`
+	Bio           string    `json:"bio,omitempty"`
+	Status        int16     `json:"status"`
+	EmailVerified bool      `json:"emailVerified"`
+	IsAdmin       bool      `json:"isAdmin"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+// detectUniqueViolation maps a pg unique-constraint error to the name
+// of the violating column. Returns "" if not a unique violation.
+func detectUniqueViolation(err error) string {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return ""
+	}
+	if pgErr.Code != "23505" {
+		return ""
+	}
+	switch {
+	case strings.Contains(pgErr.ConstraintName, "username"):
+		return "username"
+	case strings.Contains(pgErr.ConstraintName, "email"):
+		return "email"
+	case strings.Contains(pgErr.ConstraintName, "account_no"):
+		return "account_no"
+	}
+	return ""
 }
 
 // sendVerificationFor issues + mails a verification link for the given

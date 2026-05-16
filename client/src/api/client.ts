@@ -89,10 +89,41 @@ export async function register(input: {
   email: string;
   password: string;
   nickname?: string;
+  accountNo: string;
+  selectionToken: string;
 }): Promise<User> {
   try {
     const res = await api.post<{ user: User }>('/api/v1/auth/register', input);
     return res.data.user;
+  } catch (e) {
+    throw unwrapError(e);
+  }
+}
+
+export interface AccountNoDraw {
+  numbers: string[];
+  selectionToken: string;
+  refreshesLeft: number;
+}
+
+// drawAccountNumbers gets 10 random unclaimed account numbers from the
+// current open segment. The server reserves them for 10 minutes — the
+// token must be carried through to the eventual register call.
+export async function drawAccountNumbers(): Promise<AccountNoDraw> {
+  try {
+    const res = await api.post<AccountNoDraw>('/api/v1/auth/account-no/draw');
+    return res.data;
+  } catch (e) {
+    throw unwrapError(e);
+  }
+}
+
+// refreshAccountNumbers swaps the current 10 for a fresh batch. Server
+// enforces a hard cap of 3 refreshes per draw session.
+export async function refreshAccountNumbers(selectionToken: string): Promise<AccountNoDraw> {
+  try {
+    const res = await api.post<AccountNoDraw>('/api/v1/auth/account-no/refresh', { selectionToken });
+    return res.data;
   } catch (e) {
     throw unwrapError(e);
   }
