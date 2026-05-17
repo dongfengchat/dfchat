@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -283,13 +284,42 @@ func (r *Repo) Leave(ctx context.Context, groupID, userID int64) error {
 
 // Members returns all members of a group with their user info.
 func (r *Repo) Members(ctx context.Context, groupID int64) ([]*Member, error) {
-	rows, err := r.pool.Query(ctx,
-		`SELECT gm.user_id, u.username, COALESCE(gm.nickname, u.nickname),
-		        COALESCE(u.avatar_url,''), gm.role, gm.joined_at
-		 FROM group_members gm
-		 JOIN users u ON u.id = gm.user_id
-		 WHERE gm.group_id = $1
-		 ORDER BY gm.role DESC, gm.joined_at ASC`, groupID)
+	return r.MembersFiltered(ctx, groupID, "")
+}
+
+// MembersFiltered returns the group's members, optionally filtered by
+// a case-insensitive substring match on username OR nickname (group
+// override, falling back to user nickname). Empty q returns every
+// member, identical to the legacy Members() shape.
+func (r *Repo) MembersFiltered(ctx context.Context, groupID int64, q string) ([]*Member, error) {
+	const base = `
+		SELECT gm.user_id, u.username, COALESCE(gm.nickname, u.nickname),
+		       COALESCE(u.avatar_url,''), gm.role, gm.joined_at
+		FROM group_members gm
+		JOIN users u ON u.id = gm.user_id
+		WHERE gm.group_id = $1`
+	const order = ` ORDER BY gm.role DESC, gm.joined_at ASC`
+	var (
+		rows interface {
+			Next() bool
+			Scan(...any) error
+			Close()
+			Err() error
+		}
+		err error
+	)
+	if q == "" {
+		rows, err = r.pool.Query(ctx, base+order, groupID)
+	} else {
+		// ILIKE pattern; quote any %/_ in the user input so substrings
+		// are literal. Then surround with %…% for substring match.
+		safe := strings.ReplaceAll(q, `\`, `\\`)
+		safe = strings.ReplaceAll(safe, `%`, `\%`)
+		safe = strings.ReplaceAll(safe, `_`, `\_`)
+		rows, err = r.pool.Query(ctx, base+
+			` AND (u.username ILIKE $2 OR COALESCE(gm.nickname, u.nickname) ILIKE $2)`+order,
+			groupID, "%"+safe+"%")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -303,6 +333,85 @@ func (r *Repo) Members(ctx context.Context, groupID int64) ([]*Member, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// Delete hard-deletes a group. Caller MUST gate on owner role. The FK
+// constraints on group_members / channels / conversation_members /
+// group_notify_modes are all ON DELETE CASCADE, so a single DELETE
+// here cleans up the entire shape. We don't touch the conversations /
+// messages rows — those persist so historical exports stay sane, but
+// nobody is in conversation_members anymore so they're unreachable.
+func (r *Repo) Delete(ctx context.Context, groupID int64) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM groups WHERE id = $1`, groupID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// TransferOwnership demotes the current owner to admin and promotes the
+// named target user to owner. Verifies the target is already in the
+// group; returns ErrNotMember if not. Caller MUST gate on the caller
+// being the current owner (we don't re-check here — handler does).
+func (r *Repo) TransferOwnership(ctx context.Context, groupID, oldOwner, newOwner int64) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Make sure new owner is actually a member.
+	var role int16
+	if err := tx.QueryRow(ctx,
+		`SELECT role FROM group_members WHERE group_id = $1 AND user_id = $2`,
+		groupID, newOwner).Scan(&role); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotMember
+		}
+		return err
+	}
+
+	// owner_id on the group row
+	if _, err := tx.Exec(ctx,
+		`UPDATE groups SET owner_id = $1 WHERE id = $2`, newOwner, groupID); err != nil {
+		return err
+	}
+	// new owner → role 2
+	if _, err := tx.Exec(ctx,
+		`UPDATE group_members SET role = 2 WHERE group_id = $1 AND user_id = $2`,
+		groupID, newOwner); err != nil {
+		return err
+	}
+	// old owner → demote to admin (1) so they keep enough power to
+	// leave cleanly or assist the new owner.
+	if _, err := tx.Exec(ctx,
+		`UPDATE group_members SET role = 1 WHERE group_id = $1 AND user_id = $2`,
+		groupID, oldOwner); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// RotateInviteCode generates a fresh code and returns it. The old code
+// becomes unusable. Used by /groups/:id/invite/rotate — also called
+// implicitly inside Kick.
+func (r *Repo) RotateInviteCode(ctx context.Context, groupID int64) (string, error) {
+	code, err := generateInviteCode()
+	if err != nil {
+		return "", err
+	}
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE groups SET invite_code = $2 WHERE id = $1`, groupID, code)
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		return "", ErrNotFound
+	}
+	return code, nil
 }
 
 // GetMemberRole returns 0/1/2 for member/admin/owner; ErrNotMember if absent.
@@ -555,12 +664,13 @@ type UpdateInput struct {
 	IconURL      *string
 	Description  *string
 	Announcement *string
+	IsPublic     *bool
 }
 
 // Update mutates editable fields. Caller must verify owner/admin permission.
 func (r *Repo) Update(ctx context.Context, id int64, in UpdateInput) (*Group, error) {
-	sets := make([]string, 0, 4)
-	args := make([]any, 0, 5)
+	sets := make([]string, 0, 5)
+	args := make([]any, 0, 6)
 	idx := 1
 	if in.Name != nil {
 		sets = append(sets, "name = $"+itoa(idx))
@@ -580,6 +690,11 @@ func (r *Repo) Update(ctx context.Context, id int64, in UpdateInput) (*Group, er
 	if in.Announcement != nil {
 		sets = append(sets, "announcement = NULLIF($"+itoa(idx)+", '')")
 		args = append(args, *in.Announcement)
+		idx++
+	}
+	if in.IsPublic != nil {
+		sets = append(sets, "is_public = $"+itoa(idx))
+		args = append(args, *in.IsPublic)
 		idx++
 	}
 	if len(sets) == 0 {

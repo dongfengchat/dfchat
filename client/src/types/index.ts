@@ -99,6 +99,11 @@ export interface ChatMessage {
   replyTo?: number;
   reactions?: ReactionCount[];
   isRecalled: boolean;
+  // Edit metadata — present on text messages that have been edited
+  // within the 5-min window. Client renders "(已编辑)" when editedAt is
+  // set. Absent on never-edited messages.
+  editedAt?: string;
+  editCount?: number;
   createdAt: string;
 }
 

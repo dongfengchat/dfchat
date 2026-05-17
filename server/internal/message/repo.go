@@ -112,10 +112,10 @@ func (r *Repo) Recall(ctx context.Context, msgID, userID int64) (*Message, error
 	err = r.pool.QueryRow(ctx,
 		`UPDATE messages SET is_recalled = TRUE WHERE id = $1
 		 RETURNING id, conversation_id, sender_id, type, content, seq,
-		           COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, created_at`,
+		           COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, edited_at, edit_count, created_at`,
 		msgID,
 	).Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Content,
-		&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.CreatedAt)
+		&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.EditedAt, &m.EditCount, &m.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -143,9 +143,9 @@ func (r *Repo) Insert(ctx context.Context, p InsertParams) (*Message, error) {
 		`INSERT INTO messages (conversation_id, sender_id, type, content, seq, mentions, reply_to)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, conversation_id, sender_id, type, content, seq,
-		           COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, created_at`,
+		           COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, edited_at, edit_count, created_at`,
 		p.ConversationID, p.SenderID, p.Type, p.Content, seq, p.Mentions, p.ReplyTo,
-	).Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Content, &m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.CreatedAt); err != nil {
+	).Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Content, &m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.EditedAt, &m.EditCount, &m.CreatedAt); err != nil {
 		return nil, err
 	}
 
@@ -171,6 +171,50 @@ func (r *Repo) ConvOfMessage(ctx context.Context, msgID int64) (string, error) {
 		return "", ErrMessageNotFound
 	}
 	return conv, err
+}
+
+// GetByID hydrates a single message including all metadata. Used by
+// the edit handler to validate ownership + recall state + window.
+func (r *Repo) GetByID(ctx context.Context, msgID int64) (*Message, error) {
+	m := &Message{}
+	err := r.pool.QueryRow(ctx,
+		`SELECT id, conversation_id, sender_id, type, content, seq,
+		        COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, edited_at, edit_count, created_at
+		 FROM messages WHERE id = $1`, msgID,
+	).Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Content,
+		&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.EditedAt, &m.EditCount, &m.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrMessageNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// Edit rewrites the content of a text message and bumps edit_count +
+// edited_at. Caller must already have checked ownership, window, and
+// recall state. Returns the updated row for fan-out.
+func (r *Repo) Edit(ctx context.Context, msgID int64, content json.RawMessage) (*Message, error) {
+	m := &Message{}
+	err := r.pool.QueryRow(ctx,
+		`UPDATE messages
+		    SET content = $2,
+		        edited_at = NOW(),
+		        edit_count = edit_count + 1
+		  WHERE id = $1
+		  RETURNING id, conversation_id, sender_id, type, content, seq,
+		            COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, edited_at, edit_count, created_at`,
+		msgID, content,
+	).Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Content,
+		&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.EditedAt, &m.EditCount, &m.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrMessageNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // AttachReactions populates msg.Reactions for each message in the slice.
@@ -343,7 +387,7 @@ func (r *Repo) ListPins(ctx context.Context, convID string) ([]*Pin, error) {
 		if err := rows.Scan(
 			&p.ConversationID, &p.MessageID, &p.PinnedBy, &p.PinnedAt,
 			&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Content, &m.Seq,
-			&m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.CreatedAt,
+			&m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.EditedAt, &m.EditCount, &m.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -417,7 +461,7 @@ func (r *Repo) ListAfter(ctx context.Context, convID string, afterSeq int64, lim
 	}
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, conversation_id, sender_id, type, content, seq,
-		        COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, created_at
+		        COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, edited_at, edit_count, created_at
 		 FROM messages WHERE conversation_id=$1 AND seq > $2
 		 ORDER BY seq ASC LIMIT $3`, convID, afterSeq, limit)
 	if err != nil {
@@ -428,7 +472,7 @@ func (r *Repo) ListAfter(ctx context.Context, convID string, afterSeq int64, lim
 	for rows.Next() {
 		m := &Message{}
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Content,
-			&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.CreatedAt); err != nil {
+			&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.EditedAt, &m.EditCount, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -445,12 +489,12 @@ func (r *Repo) ListAround(ctx context.Context, convID string, seq int64, window 
 	}
 	rows, err := r.pool.Query(ctx, `
 		(SELECT id, conversation_id, sender_id, type, content, seq,
-		        COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, created_at
+		        COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, edited_at, edit_count, created_at
 		 FROM messages WHERE conversation_id=$1 AND seq < $2
 		 ORDER BY seq DESC LIMIT $3)
 		UNION
 		(SELECT id, conversation_id, sender_id, type, content, seq,
-		        COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, created_at
+		        COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, edited_at, edit_count, created_at
 		 FROM messages WHERE conversation_id=$1 AND seq >= $2
 		 ORDER BY seq ASC LIMIT $3)
 		ORDER BY seq ASC`, convID, seq, window)
@@ -462,7 +506,7 @@ func (r *Repo) ListAround(ctx context.Context, convID string, seq int64, window 
 	for rows.Next() {
 		m := &Message{}
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Content,
-			&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.CreatedAt); err != nil {
+			&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.EditedAt, &m.EditCount, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -476,7 +520,7 @@ func (r *Repo) ListRecent(ctx context.Context, convID string, limit int, beforeS
 		limit = 50
 	}
 	const baseQ = `SELECT id, conversation_id, sender_id, type, content, seq,
-		        COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, created_at FROM messages`
+		        COALESCE(mentions, '{}'::BIGINT[]), reply_to, is_recalled, edited_at, edit_count, created_at FROM messages`
 	rows, err := func() (pgx.Rows, error) {
 		if beforeSeq > 0 {
 			return r.pool.Query(ctx, baseQ+` WHERE conversation_id=$1 AND seq < $2 ORDER BY seq DESC LIMIT $3`,
@@ -492,7 +536,7 @@ func (r *Repo) ListRecent(ctx context.Context, convID string, limit int, beforeS
 	for rows.Next() {
 		m := &Message{}
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Type, &m.Content,
-			&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.CreatedAt); err != nil {
+			&m.Seq, &m.Mentions, &m.ReplyTo, &m.IsRecalled, &m.EditedAt, &m.EditCount, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

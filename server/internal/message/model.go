@@ -12,6 +12,16 @@ const (
 
 	// How long after sending a message the author may still recall it.
 	RecallWindowSeconds = 120
+	// How long after sending the author may still edit the text body.
+	// Generous compared to recall (5 min) — typos are common, and a
+	// stricter window forces users to recall+resend, which spams the UI.
+	EditWindowSeconds = 300
+
+	// MentionEveryone is the sentinel user_id stored in messages.mentions
+	// for @everyone. Real users.id values are positive integers, so 0
+	// is a safe out-of-band marker that survives existing BIGINT[]
+	// storage without a migration.
+	MentionEveryone int64 = 0
 )
 
 type Message struct {
@@ -25,6 +35,8 @@ type Message struct {
 	ReplyTo        *int64          `json:"replyTo,omitempty"`
 	Reactions      []ReactionCount `json:"reactions,omitempty"`
 	IsRecalled     bool            `json:"isRecalled"`
+	EditedAt       *time.Time      `json:"editedAt,omitempty"`
+	EditCount      int             `json:"editCount,omitempty"`
 	CreatedAt      time.Time       `json:"createdAt"`
 }
 

@@ -343,6 +343,7 @@ export async function updateGroup(id: string, patch: {
   iconUrl?: string;
   description?: string;
   announcement?: string;
+  isPublic?: boolean;
 }): Promise<Group> {
   try {
     const res = await api.patch<{ group: Group }>(`/api/v1/groups/${id}`, patch);
@@ -352,6 +353,42 @@ export async function updateGroup(id: string, patch: {
 
 export async function leaveGroup(id: string): Promise<void> {
   try { await api.delete(`/api/v1/groups/${id}/leave`); } catch (e) { throw unwrapError(e); }
+}
+
+// deleteGroup dissolves a group entirely. Owner-only on the server.
+// Cascades to members / channels / convs; historical messages persist
+// but become unreachable since nobody is in conversation_members.
+export async function deleteGroup(id: string): Promise<void> {
+  try { await api.delete(`/api/v1/groups/${id}`); } catch (e) { throw unwrapError(e); }
+}
+
+// transferGroupOwner hands ownership to another existing member. The
+// caller (current owner) is demoted to admin so they keep enough
+// power to leave gracefully or assist the new owner.
+export async function transferGroupOwner(id: string, newOwnerUserId: string): Promise<void> {
+  try { await api.post(`/api/v1/groups/${id}/transfer`, { userId: newOwnerUserId }); } catch (e) { throw unwrapError(e); }
+}
+
+// rotateGroupInviteCode mints a fresh invite_code, invalidating the
+// old one. Owner or admin only — useful when a leaked code is being
+// abused without wanting to kick anyone.
+export async function rotateGroupInviteCode(id: string): Promise<string> {
+  try {
+    const res = await api.post<{ inviteCode: string }>(`/api/v1/groups/${id}/invite/rotate`);
+    return res.data.inviteCode;
+  } catch (e) { throw unwrapError(e); }
+}
+
+// listGroupMembers now supports an optional case-insensitive substring
+// filter on username/nickname — used by the in-group "find member"
+// UI without needing a separate endpoint.
+export async function searchGroupMembers(groupId: string, q: string): Promise<GroupMember[]> {
+  try {
+    const res = await api.get<{ members: GroupMember[] }>(
+      `/api/v1/groups/${groupId}/members${q ? `?q=${encodeURIComponent(q)}` : ''}`,
+    );
+    return res.data.members ?? [];
+  } catch (e) { throw unwrapError(e); }
 }
 
 export async function getGroupNotifyMode(id: string): Promise<number> {
@@ -666,6 +703,40 @@ export async function createChannel(groupId: string, name: string): Promise<Chan
   } catch (e) {
     throw unwrapError(e);
   }
+}
+
+// renameChannel updates the display name of a channel. Server gates
+// this on owner/admin role in the parent group.
+export async function renameChannel(channelId: string, name: string): Promise<Channel> {
+  try {
+    const res = await api.patch<{ channel: Channel }>(`/api/v1/channels/${channelId}`, { name });
+    return res.data.channel;
+  } catch (e) { throw unwrapError(e); }
+}
+
+// reorderChannels sets the new top-to-bottom order of channels in a
+// group. Channels not mentioned keep their existing relative order
+// pushed below the supplied list.
+export async function reorderChannels(groupId: string, orderedChannelIds: string[]): Promise<void> {
+  try {
+    await api.patch(`/api/v1/groups/${groupId}/channels/positions`, { order: orderedChannelIds });
+  } catch (e) { throw unwrapError(e); }
+}
+
+// deleteChannel — owner/admin only. Server refuses to delete the last
+// remaining channel in a group (creates a stranded conversation otherwise).
+export async function deleteChannel(channelId: string): Promise<void> {
+  try { await api.delete(`/api/v1/channels/${channelId}`); } catch (e) { throw unwrapError(e); }
+}
+
+// editMessage rewrites the text of an own message within the server's
+// 5-minute edit window. Only `type:"text"` messages are editable.
+// Returns the updated row with editedAt + editCount populated.
+export async function editMessage(messageId: string, text: string): Promise<ChatMessage> {
+  try {
+    const res = await api.patch<{ message: ChatMessage }>(`/api/v1/messages/${messageId}`, { content: { text } });
+    return res.data.message;
+  } catch (e) { throw unwrapError(e); }
 }
 
 export interface AdminStats {

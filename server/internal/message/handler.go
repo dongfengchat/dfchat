@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dongfang/dfchat/server/internal/channel"
 	"github.com/dongfang/dfchat/server/internal/friend"
@@ -38,6 +39,7 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	write := g.Group("")
 	write.Use(middleware.RateLimitPerUser(5, 15))
 	write.POST("", h.send)
+	write.PATCH("/:id", h.edit)
 	write.POST("/:id/recall", h.recall)
 	write.POST("/:id/reactions", h.addReaction)
 	write.DELETE("/:id/reactions/:emoji", h.removeReaction)
@@ -182,6 +184,10 @@ func (h *Handler) send(c *gin.Context) {
 	// conversation. Stops a sender from notifying random users (or
 	// probing user-id existence via mention fan-out) and quietly drops
 	// kicked / former members so they don't get phantom pings.
+	//
+	// MentionEveryone (sentinel id 0) is preserved if the sender has
+	// permission to @everyone — owner/admin in groups, anyone in a
+	// private DM. The client renders this as a "@全体成员" pill.
 	mentions := parseMentions(req.Mentions)
 	if len(mentions) > 0 {
 		validMembers, err := h.repo.MembersOf(c.Request.Context(), convID)
@@ -189,7 +195,30 @@ func (h *Handler) send(c *gin.Context) {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
 			return
 		}
-		mentions = filterMentions(mentions, validMembers)
+		// Decide whether to keep @everyone in the filter result.
+		allowEveryone := false
+		if strings.HasPrefix(convID, "p_") {
+			// 1:1 — both parties already get every message, @everyone
+			// is meaningless but also harmless. Pass-through.
+			allowEveryone = true
+		} else if strings.HasPrefix(convID, "g_") {
+			gid, err := strconv.ParseInt(strings.TrimPrefix(convID, "g_"), 10, 64)
+			if err == nil {
+				if role, rerr := h.groups.GetMemberRole(c.Request.Context(), gid, uid); rerr == nil && role >= 1 {
+					allowEveryone = true
+				}
+			}
+		} else if strings.HasPrefix(convID, "c_") {
+			cid, err := strconv.ParseInt(strings.TrimPrefix(convID, "c_"), 10, 64)
+			if err == nil {
+				if gid, gerr := h.channels.GroupOf(c.Request.Context(), cid); gerr == nil {
+					if role, rerr := h.groups.GetMemberRole(c.Request.Context(), gid, uid); rerr == nil && role >= 1 {
+						allowEveryone = true
+					}
+				}
+			}
+		}
+		mentions = filterMentions(mentions, validMembers, allowEveryone)
 	}
 
 	var replyTo *int64
@@ -234,7 +263,10 @@ func (h *Handler) send(c *gin.Context) {
 func parseMentions(raw []string) []int64 {
 	out := make([]int64, 0, len(raw))
 	for _, s := range raw {
-		if id, err := strconv.ParseInt(s, 10, 64); err == nil && id > 0 {
+		// "0" survives as the MentionEveryone sentinel — the
+		// permission check + dedup happens later in filterMentions.
+		// Negative ids are rejected outright.
+		if id, err := strconv.ParseInt(s, 10, 64); err == nil && id >= 0 {
 			out = append(out, id)
 		}
 	}
@@ -244,8 +276,14 @@ func parseMentions(raw []string) []int64 {
 // filterMentions keeps only ids that are members of the conversation
 // (deduplicated). Order from the caller is preserved for ids that
 // survive, which keeps the @-list reading natural in the UI.
-func filterMentions(mentions, members []int64) []int64 {
-	if len(mentions) == 0 || len(members) == 0 {
+//
+// MentionEveryone (sentinel id 0) is preserved iff allowEveryone is
+// true. Caller is expected to have computed that based on the sender's
+// role in the conversation. If a sender lacks the privilege but tries
+// anyway, the sentinel is silently dropped — same UX as the
+// per-user filter for non-members.
+func filterMentions(mentions, members []int64, allowEveryone bool) []int64 {
+	if len(mentions) == 0 {
 		return nil
 	}
 	memberSet := make(map[int64]struct{}, len(members))
@@ -255,7 +293,11 @@ func filterMentions(mentions, members []int64) []int64 {
 	seen := make(map[int64]struct{}, len(mentions))
 	out := mentions[:0]
 	for _, m := range mentions {
-		if _, ok := memberSet[m]; !ok {
+		if m == MentionEveryone {
+			if !allowEveryone {
+				continue
+			}
+		} else if _, ok := memberSet[m]; !ok {
 			continue
 		}
 		if _, dup := seen[m]; dup {
@@ -309,6 +351,76 @@ func (h *Handler) recall(c *gin.Context) {
 // conversation_members is the single source of truth.
 func (h *Handler) membersOf(c *gin.Context, convID string) ([]int64, error) {
 	return h.repo.MembersOf(c.Request.Context(), convID)
+}
+
+type editReq struct {
+	Content json.RawMessage `json:"content"`
+}
+
+// edit lets the original author rewrite a text message's body within a
+// 5-minute window. Only `text` type is editable — image/file/etc. have
+// no meaningful "rewrite" semantics (the content there is a URL into
+// storage; if you want to change the file you re-upload + re-send).
+// Recalled messages are not editable.
+//
+// The edit fan-out goes out as chat.edit with the new content embedded;
+// the client replaces in place and renders a "(已编辑)" badge.
+func (h *Handler) edit(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20070, "message": "invalid id"})
+		return
+	}
+	var req editReq
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.Content) == 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20071, "message": "content required"})
+		return
+	}
+	// We don't expose Type on the edit body — the type stays whatever the
+	// original was. validateContent still needs a type to gate, so reload
+	// the original to find out (and to enforce text-only editing).
+	orig, err := h.repo.GetByID(c.Request.Context(), id)
+	if errors.Is(err, ErrMessageNotFound) {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 20072, "message": "message not found"})
+		return
+	}
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	if orig.SenderID != uid {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 20073, "message": "not your message"})
+		return
+	}
+	if orig.IsRecalled {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20074, "message": "cannot edit a recalled message"})
+		return
+	}
+	if orig.Type != "text" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20075, "message": "only text messages are editable"})
+		return
+	}
+	if time.Since(orig.CreatedAt) > EditWindowSeconds*time.Second {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 20076, "message": "edit window expired (5 min)"})
+		return
+	}
+	if err := validateContent(orig.Type, req.Content); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20077, "message": err.Error()})
+		return
+	}
+
+	m, err := h.repo.Edit(c.Request.Context(), id, req.Content)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	// Fan-out to every member so existing clients re-render in place.
+	members, _ := h.membersOf(c, m.ConversationID)
+	for _, member := range members {
+		h.bus.Publish(member, wsbus.Event{Type: "chat.edit", Payload: m})
+	}
+	c.JSON(http.StatusOK, gin.H{"message": m})
 }
 
 func (h *Handler) list(c *gin.Context) {

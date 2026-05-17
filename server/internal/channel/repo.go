@@ -116,6 +116,108 @@ func (r *Repo) FindByID(ctx context.Context, id int64) (*Channel, error) {
 	return ch, err
 }
 
+// Rename updates the display name of an existing channel. Caller must
+// gate on owner/admin role.
+func (r *Repo) Rename(ctx context.Context, id int64, name string) (*Channel, error) {
+	ch := &Channel{}
+	err := r.pool.QueryRow(ctx,
+		`UPDATE channels SET name = $2 WHERE id = $1
+		 RETURNING id, group_id, type, name, COALESCE(topic, ''), position, created_at`,
+		id, name,
+	).Scan(&ch.ID, &ch.GroupID, &ch.Type, &ch.Name, &ch.Topic, &ch.Position, &ch.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return ch, err
+}
+
+// Reorder rewrites the position column for the given channel ids in
+// the order they appear (0-indexed). Channels in the group but not
+// in the list are pushed to the end, preserving their existing
+// relative order. Whole thing in a tx so a partial failure can't
+// leave us with duplicate / sparse positions.
+func (r *Repo) Reorder(ctx context.Context, groupID int64, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Discard any ids that aren't actually members of this group —
+	// stops a malicious caller from reshuffling channels in other
+	// groups via this endpoint.
+	rows, err := tx.Query(ctx,
+		`SELECT id FROM channels WHERE group_id = $1`, groupID)
+	if err != nil {
+		return err
+	}
+	valid := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		valid[id] = struct{}{}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Apply the requested order first.
+	seen := make(map[int64]struct{})
+	pos := 0
+	for _, id := range ids {
+		if _, ok := valid[id]; !ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, err := tx.Exec(ctx,
+			`UPDATE channels SET position = $2 WHERE id = $1`, id, pos); err != nil {
+			return err
+		}
+		pos++
+	}
+	// Push remaining channels (not in the supplied order) to the end,
+	// keeping their existing relative order.
+	tailRows, err := tx.Query(ctx,
+		`SELECT id FROM channels WHERE group_id = $1
+		 ORDER BY position ASC, id ASC`, groupID)
+	if err != nil {
+		return err
+	}
+	tail := make([]int64, 0)
+	for tailRows.Next() {
+		var id int64
+		if err := tailRows.Scan(&id); err != nil {
+			tailRows.Close()
+			return err
+		}
+		if _, claimed := seen[id]; !claimed {
+			tail = append(tail, id)
+		}
+	}
+	tailRows.Close()
+	if err := tailRows.Err(); err != nil {
+		return err
+	}
+	for _, id := range tail {
+		if _, err := tx.Exec(ctx,
+			`UPDATE channels SET position = $2 WHERE id = $1`, id, pos); err != nil {
+			return err
+		}
+		pos++
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *Repo) Delete(ctx context.Context, id int64) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
