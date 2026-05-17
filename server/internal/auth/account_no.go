@@ -194,6 +194,49 @@ func populateSegment(ctx context.Context, pool *pgxpool.Pool, segmentNo, start, 
 			"inserted", inserted,
 			"locked_premium", locked,
 			"already_used", len(used))
+
+		// Belt-and-suspenders self-check. Query the DB back and count
+		// how many rows in this segment ended up locked. Compare against
+		// what the math says we should have (10 per 10k-segment, minus
+		// any that landed in `used`). Wide discrepancy = something
+		// upstream broke (trigger missing, isLockedPattern regression,
+		// schema drift) — log loud so ops investigates.
+		verifyLockedCount(ctx, pool, segmentNo, start, end, log)
 	}
 	return nil
+}
+
+// verifyLockedCount reads back the DB to count how many premium numbers
+// are locked in the just-populated segment, and warns if the count
+// disagrees with what isLockedPattern would say.
+//
+// This catches three classes of failure invisible to the populate
+// path itself:
+//   - Trigger missing from a fresh DB (would let unlocked premiums through)
+//   - isLockedPattern weakened by a regression (would lock too few)
+//   - Manual SQL between migration and pool population
+func verifyLockedCount(ctx context.Context, pool *pgxpool.Pool, segmentNo, start, end int64, log *slog.Logger) {
+	var actualLocked int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM account_no_pool WHERE segment_no = $1 AND is_locked = TRUE`,
+		segmentNo).Scan(&actualLocked); err != nil {
+		log.Warn("account-no: verify failed", "segment", segmentNo, "err", err.Error())
+		return
+	}
+	expectedLocked := 0
+	for n := start; n <= end; n++ {
+		if isLockedPattern(n) {
+			expectedLocked++
+		}
+	}
+	if actualLocked != expectedLocked {
+		log.Warn("account-no: locked-count mismatch — premium numbers may have leaked",
+			"segment", segmentNo,
+			"expected", expectedLocked,
+			"actual", actualLocked,
+			"hint", "check trigger migration 000022, isLockedPattern, and any manual SQL")
+	} else {
+		log.Info("account-no: locked-count self-check OK",
+			"segment", segmentNo, "locked", actualLocked)
+	}
 }
