@@ -73,36 +73,42 @@ export default function Settings() {
   }
 
   return (
-    <div className="min-h-screen bg-bg-1 text-ink-1 flex flex-col">
+    // h-screen + flex column so the TitleBar (and the macOS window-
+    // drag region inside it) stays pinned. Inner content scrolls in
+    // its own viewport-bounded container instead of pushing the whole
+    // page.
+    <div className="h-screen bg-bg-1 text-ink-1 flex flex-col">
       <TitleBar title="东风快信 · 设置" />
-      <header className="h-14 px-6 border-b border-bg-5/40 bg-bg-2/60 backdrop-blur flex items-center gap-3">
+      <header className="h-14 px-6 border-b border-bg-5/40 bg-bg-2/60 backdrop-blur flex items-center gap-3 shrink-0">
         <button onClick={() => navigate('/home')} className="btn-icon" title="返回">
           <ArrowLeft size={18} />
         </button>
         <h1 className="text-base font-semibold">设置</h1>
       </header>
 
-      <div className="flex-1 flex max-w-5xl w-full mx-auto p-6 gap-6">
-        <nav className="w-48 shrink-0 space-y-1">
-          <TabButton active={tab === 'profile'} onClick={() => setTab('profile')} icon={<UserCircle size={16} />} label="个人资料" />
-          <TabButton active={tab === 'security'} onClick={() => setTab('security')} icon={<KeyRound size={16} />} label="账号安全" />
-          <TabButton active={tab === 'devices'} onClick={() => setTab('devices')} icon={<Monitor size={16} />} label="登录设备" />
-          <TabButton active={tab === 'archive'} onClick={() => setTab('archive')} icon={<Database size={16} />} label="本地归档" />
-          <TabButton active={tab === 'about'} onClick={() => setTab('about')} icon={<Info size={16} />} label="关于" />
-        </nav>
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <div className="flex max-w-5xl w-full mx-auto p-6 gap-6">
+          <nav className="w-48 shrink-0 space-y-1">
+            <TabButton active={tab === 'profile'} onClick={() => setTab('profile')} icon={<UserCircle size={16} />} label="个人资料" />
+            <TabButton active={tab === 'security'} onClick={() => setTab('security')} icon={<KeyRound size={16} />} label="账号安全" />
+            <TabButton active={tab === 'devices'} onClick={() => setTab('devices')} icon={<Monitor size={16} />} label="登录设备" />
+            <TabButton active={tab === 'archive'} onClick={() => setTab('archive')} icon={<Database size={16} />} label="本地归档" />
+            <TabButton active={tab === 'about'} onClick={() => setTab('about')} icon={<Info size={16} />} label="关于" />
+          </nav>
 
-        <main className="flex-1 min-w-0">
-          {tab === 'profile' && (
-            <ProfileTab
-              me={me}
-              onSaved={(u) => accessToken && setSession(u, accessToken)}
-            />
-          )}
-          {tab === 'security' && <SecurityTab />}
-          {tab === 'devices' && <DevicesTab />}
-          {tab === 'archive' && <ArchiveTab />}
-          {tab === 'about' && <AboutTab />}
-        </main>
+          <main className="flex-1 min-w-0">
+            {tab === 'profile' && (
+              <ProfileTab
+                me={me}
+                onSaved={(u) => accessToken && setSession(u, accessToken)}
+              />
+            )}
+            {tab === 'security' && <SecurityTab />}
+            {tab === 'devices' && <DevicesTab />}
+            {tab === 'archive' && <ArchiveTab />}
+            {tab === 'about' && <AboutTab />}
+          </main>
+        </div>
       </div>
     </div>
   );

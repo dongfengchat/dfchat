@@ -85,7 +85,7 @@ export default function Live() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-bg-1 text-ink-1">
+    <div className="h-screen flex flex-col bg-bg-1 text-ink-1">
       <TitleBar title="东风快信 · 直播" />
       <header className="h-14 px-6 border-b border-bg-5/40 bg-bg-2/60 backdrop-blur flex items-center gap-3 shrink-0">
         <button onClick={() => navigate('/home')} className="btn-icon" title="返回聊天">

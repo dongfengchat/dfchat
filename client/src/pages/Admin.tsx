@@ -284,7 +284,11 @@ export default function Admin() {
           </section>}
         </>
       )}
+      </div>
 
+      {/* Modal sits outside the scrollable inner area — it's
+          position:fixed already, but keeping it as a sibling of the
+          scroll container avoids any stacking-context surprises. */}
       {selectedUser && (
         <UserDetailsModal
           user={selectedUser}

@@ -32,9 +32,9 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen auth-bg flex flex-col">
+    <div className="h-screen auth-bg flex flex-col">
       <TitleBar title="东风快信" />
-      <div className="flex-1 flex items-center justify-center px-4 py-10">
+      <div className="flex-1 min-h-0 overflow-y-auto flex items-center justify-center px-4 py-10">
       <div className="w-full max-w-md">
         <div className="flex items-center justify-center gap-2 mb-6">
           <span className="w-10 h-10 rounded-xl bg-brand-500 flex items-center justify-center">
