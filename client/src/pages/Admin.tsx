@@ -1,19 +1,25 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
+  Activity,
   ArrowLeft,
   Ban,
   CheckCircle2,
   CircleOff,
   FileText,
+  Gift,
   Hash,
+  LogOut,
   MessageSquare,
   RadioTower,
+  RefreshCw,
   Search,
   ShieldCheck,
   Trash2,
+  Unlock,
   UserCircle,
   Users,
+  X,
   XCircle,
 } from 'lucide-react';
 import {
@@ -21,14 +27,21 @@ import {
   adminBanLiveRoom,
   adminDeleteLiveRoom,
   adminForceEndLive,
+  adminForceLogoutUser,
+  adminGrantPremiumNumber,
   adminListLiveRooms,
+  adminListPremiumNumbers,
   adminListUsers,
+  adminReleasePremiumNumber,
   adminSetUserStatus,
   adminStats,
+  adminUserLogins,
   type AdminLiveRoom,
+  type AdminPremiumNumber,
   type AdminSegmentStat,
   type AdminStats,
   type AdminUser,
+  type LoginLogEntry,
 } from '@/api/client';
 import { useUserStore } from '@/store/userStore';
 import Avatar from '@/components/ui/Avatar';
@@ -53,6 +66,9 @@ export default function Admin() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<AdminTab>('users');
+  // Selected user opens the details modal (login history + force-logout
+  // + ban). Click outside / X / Escape closes it.
+  const [selectedUser, setSelectedUser] = useState<AdminUser | null>(null);
 
   useEffect(() => {
     if (!me) return;
@@ -199,7 +215,12 @@ export default function Admin() {
                         </tr>
                       ))
                     : users.map((u) => (
-                        <tr key={u.id} className="border-t border-bg-5/30 hover:bg-bg-3/50">
+                        <tr
+                          key={u.id}
+                          className="border-t border-bg-5/30 hover:bg-bg-3/50 cursor-pointer"
+                          onClick={() => setSelectedUser(u)}
+                          title="点击查看详情"
+                        >
                           <td className="px-3 py-2.5">
                             <span className="font-mono text-sm text-ink-1">{u.accountNo}</span>
                             {u.isAdmin && (
@@ -233,7 +254,7 @@ export default function Admin() {
                           <td className="px-3 py-2.5 text-ink-3 text-xs">
                             {new Date(u.createdAt).toLocaleString('zh-CN', { hour12: false })}
                           </td>
-                          <td className="px-3 py-2.5 text-right">
+                          <td className="px-3 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
                             {u.status === 0 ? (
                               <button
                                 onClick={() => setStatus(u, 1)}
@@ -258,6 +279,178 @@ export default function Admin() {
           </section>}
         </>
       )}
+
+      {selectedUser && (
+        <UserDetailsModal
+          user={selectedUser}
+          onClose={() => setSelectedUser(null)}
+          onMutated={async () => {
+            // Whatever the modal did (ban, force-logout) — reload the
+            // table so the row reflects the new state.
+            await refreshUsers(search || undefined);
+            setSelectedUser(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// UserDetailsModal — opened by clicking a row in the user table. Shows
+// full profile + last 50 login attempts + ban / force-logout actions.
+// Closed with X, click-outside, or Escape.
+function UserDetailsModal({
+  user,
+  onClose,
+  onMutated,
+}: {
+  user: AdminUser;
+  onClose: () => void;
+  onMutated: () => void;
+}) {
+  const [logs, setLogs] = useState<LoginLogEntry[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const l = await adminUserLogins(user.id, 50);
+        if (!cancelled) setLogs(l);
+      } catch (e: any) {
+        if (!cancelled) setErr(e?.message ?? '加载失败');
+      }
+    })();
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', onKey);
+    return () => { cancelled = true; document.removeEventListener('keydown', onKey); };
+  }, [user.id, onClose]);
+
+  async function forceLogout() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const r = await adminForceLogoutUser(user.id);
+      toast(`已强制下线 ${r.revoked} 个会话`, 'success');
+      onMutated();
+    } catch (e: any) {
+      toast(e?.message ?? '操作失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function toggleBan() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await adminSetUserStatus(user.id, user.status === 0 ? 1 : 0);
+      toast(user.status === 0 ? '账号已封禁 + 强制下线' : '账号已解封', 'success');
+      onMutated();
+    } catch (e: any) {
+      toast(e?.message ?? '操作失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 anim-fade"
+      onClick={onClose}
+    >
+      <div
+        className="card max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-5 py-4 border-b border-bg-5/40 flex items-center justify-between">
+          <div className="flex items-center gap-3 min-w-0">
+            <Avatar name={user.nickname || user.username} size={36} />
+            <div className="min-w-0">
+              <div className="text-base font-semibold truncate">{user.nickname || user.username}</div>
+              <div className="text-xs text-ink-3">@{user.username} · 账号 <span className="font-mono">{user.accountNo}</span></div>
+            </div>
+          </div>
+          <button onClick={onClose} className="btn-icon w-8 h-8"><X size={16} /></button>
+        </div>
+
+        <div className="px-5 py-4 space-y-4 overflow-y-auto">
+          {/* Profile facts */}
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+            <div className="flex justify-between"><dt className="text-ink-3">状态</dt><dd>{statusBadge(user.status)}</dd></div>
+            <div className="flex justify-between"><dt className="text-ink-3">角色</dt><dd>{user.isAdmin ? <span className="text-accent-amber inline-flex items-center gap-1"><ShieldCheck size={12} /> 管理员</span> : <span className="text-ink-4">普通</span>}</dd></div>
+            <div className="flex justify-between col-span-2"><dt className="text-ink-3">邮箱</dt>
+              <dd className="flex items-center gap-1 truncate"><span className="truncate" title={user.email}>{user.email}</span>
+                {user.emailVerified ? <CheckCircle2 size={12} className="text-accent-green" /> : <CircleOff size={12} className="text-ink-4" />}
+              </dd>
+            </div>
+            <div className="flex justify-between"><dt className="text-ink-3">注册 IP</dt><dd className="font-mono text-xs">{user.registeredFromIp || '—'}</dd></div>
+            <div className="flex justify-between"><dt className="text-ink-3">最近登录 IP</dt><dd className="font-mono text-xs">{user.lastLoginIp || '—'}</dd></div>
+            <div className="flex justify-between col-span-2"><dt className="text-ink-3">注册时间</dt>
+              <dd className="text-xs">{new Date(user.createdAt).toLocaleString('zh-CN', { hour12: false })}</dd>
+            </div>
+          </dl>
+
+          {/* Actions */}
+          <div className="flex gap-2 border-y border-bg-5/40 py-3">
+            <button
+              onClick={forceLogout}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-bg-3 hover:bg-bg-4 text-sm"
+              title="撤销该用户所有 refresh token，现有登录会话立即失效"
+            >
+              <LogOut size={13} /> 强制下线
+            </button>
+            <button
+              onClick={toggleBan}
+              disabled={busy}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm ${
+                user.status === 0
+                  ? 'bg-accent-amber/15 text-accent-amber hover:bg-accent-amber/25'
+                  : 'bg-accent-green/15 text-accent-green hover:bg-accent-green/25'
+              }`}
+            >
+              {user.status === 0 ? <><Ban size={13} /> 封号</> : <><CheckCircle2 size={13} /> 解封</>}
+            </button>
+          </div>
+
+          {/* Login history */}
+          <div>
+            <h3 className="text-sm font-semibold flex items-center gap-1.5 mb-2">
+              <Activity size={14} className="text-brand-300" /> 登录历史 <span className="text-xs text-ink-4 font-normal">最近 50 条</span>
+            </h3>
+            {err ? (
+              <div className="text-xs text-accent-red">{err}</div>
+            ) : !logs ? (
+              <div className="text-xs text-ink-4">加载中…</div>
+            ) : logs.length === 0 ? (
+              <div className="text-xs text-ink-4">还没有登录记录</div>
+            ) : (
+              <ul className="space-y-1 max-h-72 overflow-y-auto">
+                {logs.map((l) => (
+                  <li
+                    key={l.id}
+                    className={`flex items-center gap-2 text-xs py-1.5 px-2 rounded ${
+                      l.success ? 'bg-bg-2' : 'bg-accent-red/10 border border-accent-red/30'
+                    }`}
+                  >
+                    {l.success
+                      ? <CheckCircle2 size={11} className="text-accent-green shrink-0" />
+                      : <XCircle size={11} className="text-accent-red shrink-0" />}
+                    <span className="font-mono text-ink-1 shrink-0 w-32">{l.ip || '—'}</span>
+                    <span className="text-ink-3 shrink-0 w-44">
+                      {new Date(l.createdAt).toLocaleString('zh-CN', { hour12: false })}
+                    </span>
+                    <span className="text-ink-4 truncate" title={l.userAgent}>{l.userAgent}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -519,7 +712,163 @@ function PoolPanel() {
           })}
         </div>
       )}
+
+      <PremiumNumbersPanel />
     </section>
+  );
+}
+
+// PremiumNumbersPanel lists the locked premium numbers and lets admins
+// either grant one to a specific user (by their current account_no) or
+// release the number back to the random draw pool.
+function PremiumNumbersPanel() {
+  const [nums, setNums] = useState<AdminPremiumNumber[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  // Track which row is mid-grant so we can show an inline input + spinner.
+  const [grantingNo, setGrantingNo] = useState<string | null>(null);
+  const [grantInput, setGrantInput] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    try {
+      setErr(null);
+      setNums(await adminListPremiumNumbers());
+    } catch (e: any) {
+      setErr(e?.message ?? '加载失败');
+    }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function grant(premiumNo: string) {
+    if (!grantInput.trim()) {
+      toast('请输入接收账号', 'warn');
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await adminGrantPremiumNumber(premiumNo, grantInput.trim());
+      toast(`已将 ${r.newAccountNo} 赠送给账号（原号 ${r.previousAccountNo}）`, 'success');
+      setGrantingNo(null);
+      setGrantInput('');
+      await load();
+    } catch (e: any) {
+      toast(e?.message ?? '赠送失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function release(premiumNo: string) {
+    if (!confirm(`确定释放 ${premiumNo} 到随机摇号池？此后任何人都可能抽到。`)) return;
+    setBusy(true);
+    try {
+      await adminReleasePremiumNumber(premiumNo);
+      toast(`${premiumNo} 已释放回摇号池`, 'success');
+      await load();
+    } catch (e: any) {
+      toast(e?.message ?? '释放失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-4 py-3 border-b border-bg-5/30 flex items-center gap-3">
+        <Hash size={14} className="text-brand-300" />
+        <h3 className="text-sm font-semibold">锁定的靓号</h3>
+        <span className="text-xs text-ink-4 ml-auto">
+          {nums == null ? '加载中…' : `${nums.length} 个`}
+        </span>
+        <button onClick={load} className="btn-icon w-7 h-7" title="刷新">
+          <RefreshCw size={12} />
+        </button>
+      </div>
+
+      {err && <div className="p-4 text-xs text-accent-red">{err}</div>}
+
+      {nums && nums.length === 0 && (
+        <div className="p-6 text-xs text-ink-3 text-center">
+          当前没有锁定的靓号 — 段开放时全数字相同 / 顺号 / 回文等模式才会进入锁池
+        </div>
+      )}
+
+      {nums && nums.length > 0 && (
+        <div className="max-h-[480px] overflow-y-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-bg-3 text-ink-3 sticky top-0">
+              <tr>
+                <th className="text-left px-4 py-2 font-medium">号码</th>
+                <th className="text-left px-4 py-2 font-medium">段</th>
+                <th className="text-left px-4 py-2 font-medium">归属</th>
+                <th className="text-right px-4 py-2 font-medium">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {nums.map((n) => (
+                <tr key={n.accountNo} className="border-t border-bg-5/30">
+                  <td className="px-4 py-2 font-mono">{n.accountNo}</td>
+                  <td className="px-4 py-2 text-ink-3 text-xs">段 {n.segmentNo}</td>
+                  <td className="px-4 py-2 text-xs">
+                    {n.claimed ? (
+                      <span className="text-accent-green">@{n.ownerName}</span>
+                    ) : (
+                      <span className="text-ink-4">空闲（锁定中）</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2 text-right">
+                    {n.claimed ? (
+                      <span className="text-xs text-ink-4">已被使用</span>
+                    ) : grantingNo === n.accountNo ? (
+                      <div className="inline-flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={grantInput}
+                          onChange={(e) => setGrantInput(e.target.value)}
+                          placeholder="接收账号"
+                          className="input py-1 text-xs w-32 font-mono"
+                          autoFocus
+                          disabled={busy}
+                        />
+                        <button
+                          onClick={() => grant(n.accountNo)}
+                          disabled={busy}
+                          className="text-xs px-2 py-1 rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25"
+                        >
+                          确认
+                        </button>
+                        <button
+                          onClick={() => { setGrantingNo(null); setGrantInput(''); }}
+                          disabled={busy}
+                          className="text-xs px-2 py-1 rounded text-ink-3 hover:bg-bg-3"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="inline-flex gap-1.5">
+                        <button
+                          onClick={() => { setGrantingNo(n.accountNo); setGrantInput(''); }}
+                          className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-brand-500/15 text-brand-300 hover:bg-brand-500/25"
+                        >
+                          <Gift size={11} /> 赠送
+                        </button>
+                        <button
+                          onClick={() => release(n.accountNo)}
+                          className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-bg-3 text-ink-3 hover:bg-bg-4"
+                          title="放回随机摇号池"
+                        >
+                          <Unlock size={11} /> 释放
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 

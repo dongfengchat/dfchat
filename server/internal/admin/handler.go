@@ -32,7 +32,11 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	g.GET("/users", h.listUsers)
 	g.PATCH("/users/:id/status", h.patchUserStatus)
 	g.GET("/users/:id/logins", h.userLoginHistory)
+	g.POST("/users/:id/force-logout", h.forceLogoutUser)
 	g.GET("/account-pool", h.accountPoolStats)
+	g.GET("/premium-numbers", h.listPremiumNumbers)
+	g.POST("/premium-numbers/:no/grant", h.grantPremiumNumber)
+	g.POST("/premium-numbers/:no/release", h.releasePremiumNumber)
 
 	// Live moderation — platform admin view + actions on any room.
 	g.GET("/live/rooms", h.listLiveRooms)
@@ -176,6 +180,203 @@ func (h *Handler) userLoginHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"logs": out})
 }
 
+// ===== Premium-number management =====
+//
+// Locked numbers (is_locked=true in account_no_pool) never come up in
+// the random draw — they sit aside so we can grant them to specific
+// users later (early adopters, VIPs, support escalations, eventually
+// for sale). Admin tools:
+//   - list:    GET /admin/premium-numbers?segment=X
+//   - grant:   POST /admin/premium-numbers/:no/grant { "userId": "..." }
+//             swaps the user's current account_no for the premium
+//             number. The user's old account_no goes back into the
+//             pool (no longer claimed by anyone).
+//   - release: POST /admin/premium-numbers/:no/release
+//             un-locks the number so it can flow back into normal
+//             random draws.
+
+type premiumNumber struct {
+	AccountNo  int64  `json:"accountNo,string"`
+	SegmentNo  int    `json:"segmentNo"`
+	Claimed    bool   `json:"claimed"`
+	ClaimedBy  int64  `json:"claimedBy,string,omitempty"`
+	OwnerName  string `json:"ownerName,omitempty"`
+}
+
+func (h *Handler) listPremiumNumbers(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	args := []any{limit}
+	q := `SELECT p.account_no, p.segment_no,
+	             (p.claimed_user_id IS NOT NULL) AS claimed,
+	             COALESCE(p.claimed_user_id, 0)  AS claimed_by,
+	             COALESCE(u.username, '')        AS owner_name
+	      FROM account_no_pool p
+	      LEFT JOIN users u ON u.id = p.claimed_user_id
+	      WHERE p.is_locked = TRUE`
+	if seg := c.Query("segment"); seg != "" {
+		args = append(args, seg)
+		q += ` AND p.segment_no = $` + strconv.Itoa(len(args))
+	}
+	q += ` ORDER BY p.account_no ASC LIMIT $1`
+
+	rows, err := h.pool.Query(c.Request.Context(), q, args...)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	defer rows.Close()
+	out := make([]premiumNumber, 0)
+	for rows.Next() {
+		var p premiumNumber
+		if err := rows.Scan(&p.AccountNo, &p.SegmentNo, &p.Claimed, &p.ClaimedBy, &p.OwnerName); err != nil {
+			continue
+		}
+		out = append(out, p)
+	}
+	c.JSON(http.StatusOK, gin.H{"numbers": out})
+}
+
+type grantPremiumReq struct {
+	UserAccountNo string `json:"userAccountNo"` // recipient identified by their CURRENT account_no
+}
+
+// grantPremiumNumber assigns the premium number to the user identified
+// by UserAccountNo. Two-leg swap in a single tx:
+//   - mark the premium row claimed by user.id, clear is_locked
+//   - put the user's previous number back as un-claimed (still locked
+//     if it WAS a premium number, else regular — we preserve is_locked)
+//   - flip users.account_no to the premium one
+// All in one transaction so a partial failure can't leave a user with
+// no number or two pool rows pointing at them.
+func (h *Handler) grantPremiumNumber(c *gin.Context) {
+	premiumNo, err := strconv.ParseInt(c.Param("no"), 10, 64)
+	if err != nil || premiumNo <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 70020, "message": "invalid number"})
+		return
+	}
+	var req grantPremiumReq
+	if err := c.ShouldBindJSON(&req); err != nil || req.UserAccountNo == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 70021, "message": "userAccountNo required"})
+		return
+	}
+	recipientAccNo, err := strconv.ParseInt(req.UserAccountNo, 10, 64)
+	if err != nil || recipientAccNo <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 70021, "message": "invalid userAccountNo"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Find the recipient + their current number.
+	var userID int64
+	var oldNo int64
+	if err := tx.QueryRow(ctx,
+		`SELECT id, account_no FROM users WHERE account_no = $1`, recipientAccNo,
+	).Scan(&userID, &oldNo); err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 70023, "message": "用户不存在（该账号未注册）"})
+		return
+	}
+	if oldNo == premiumNo {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 70024, "message": "该用户已拥有这个号码"})
+		return
+	}
+
+	// Premium row must be locked + unclaimed.
+	var alreadyClaimed bool
+	if err := tx.QueryRow(ctx,
+		`SELECT (claimed_user_id IS NOT NULL) FROM account_no_pool WHERE account_no = $1 AND is_locked = TRUE`,
+		premiumNo,
+	).Scan(&alreadyClaimed); err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 70025, "message": "该靓号不在锁定池中"})
+		return
+	}
+	if alreadyClaimed {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"code": 70026, "message": "该靓号已被其他用户占用"})
+		return
+	}
+
+	// Swap. Order matters: clear the user's account_no first to avoid
+	// the UNIQUE constraint firing mid-flight if oldNo and premiumNo
+	// were ever the same (defensive — we checked above too).
+	// (1) Premium row → claimed by user, unlock so it counts as
+	//     a normal claimed row going forward.
+	if _, err := tx.Exec(ctx,
+		`UPDATE account_no_pool
+		 SET claimed_user_id = $1, is_locked = FALSE, reserved_until = NULL
+		 WHERE account_no = $2`, userID, premiumNo); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	// (2) User's old number → unclaimed, available for someone else.
+	if _, err := tx.Exec(ctx,
+		`UPDATE account_no_pool SET claimed_user_id = NULL, reserved_until = NULL
+		 WHERE account_no = $1`, oldNo); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	// (3) Update user record.
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET account_no = $1 WHERE id = $2`, premiumNo, userID); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+
+	actorID, _ := c.Get("userID")
+	if h.audit != nil {
+		h.audit.Write(c.Request.Context(), audit.Entry{
+			ActorID: actorID.(int64), Action: "account_no.grant_premium",
+			TargetKind: "user", TargetID: userID,
+			IP: c.ClientIP(), UserAgent: c.GetHeader("User-Agent"),
+			Metadata: map[string]any{"premiumNo": premiumNo, "previousNo": oldNo},
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "newAccountNo": premiumNo, "previousAccountNo": oldNo})
+}
+
+// releasePremiumNumber un-locks a number so it can flow back into normal
+// random draws. Refuses if the number is currently claimed by a user.
+func (h *Handler) releasePremiumNumber(c *gin.Context) {
+	no, err := strconv.ParseInt(c.Param("no"), 10, 64)
+	if err != nil || no <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 70020, "message": "invalid number"})
+		return
+	}
+	tag, err := h.pool.Exec(c.Request.Context(),
+		`UPDATE account_no_pool
+		 SET is_locked = FALSE
+		 WHERE account_no = $1 AND is_locked = TRUE AND claimed_user_id IS NULL`, no)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 70025, "message": "该号码不在可释放的锁定池中"})
+		return
+	}
+	actorID, _ := c.Get("userID")
+	if h.audit != nil {
+		h.audit.Write(c.Request.Context(), audit.Entry{
+			ActorID: actorID.(int64), Action: "account_no.release_premium",
+			TargetKind: "account_no", TargetID: no,
+			IP: c.ClientIP(), UserAgent: c.GetHeader("User-Agent"),
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // ===== Account-number pool stats =====
 
 type segmentStat struct {
@@ -255,6 +456,16 @@ func (h *Handler) patchUserStatus(c *gin.Context) {
 		return
 	}
 
+	// Banning / soft-deleting an account must also kill its live
+	// sessions — otherwise existing JWTs keep working until expiry
+	// (~2 hours) and the user can pretend nothing happened. Status 0
+	// = active stays untouched.
+	if req.Status != 0 {
+		_, _ = h.pool.Exec(c.Request.Context(),
+			`UPDATE refresh_tokens SET revoked_at = now()
+			 WHERE user_id = $1 AND revoked_at IS NULL`, id)
+	}
+
 	actorID, _ := c.Get("userID")
 	if h.audit != nil {
 		h.audit.Write(c.Request.Context(), audit.Entry{
@@ -268,6 +479,38 @@ func (h *Handler) patchUserStatus(c *gin.Context) {
 		})
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// forceLogoutUser revokes every active session for a user without
+// changing their status. Useful when an admin spots a hijacked account
+// — kick out the attacker, let the legit owner re-login (and change
+// password from a clean session).
+func (h *Handler) forceLogoutUser(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 70020, "message": "invalid id"})
+		return
+	}
+	tag, err := h.pool.Exec(c.Request.Context(),
+		`UPDATE refresh_tokens SET revoked_at = now()
+		 WHERE user_id = $1 AND revoked_at IS NULL`, id)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	actorID, _ := c.Get("userID")
+	if h.audit != nil {
+		h.audit.Write(c.Request.Context(), audit.Entry{
+			ActorID:    actorID.(int64),
+			Action:     "user.force_logout",
+			TargetKind: "user",
+			TargetID:   id,
+			IP:         c.ClientIP(),
+			UserAgent:  c.GetHeader("User-Agent"),
+			Metadata:   map[string]any{"revoked": tag.RowsAffected()},
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"revoked": tag.RowsAffected()})
 }
 
 // ==================== Live moderation ====================

@@ -871,6 +871,61 @@ export async function adminSetUserStatus(userId: string, status: number): Promis
   }
 }
 
+export async function adminUserLogins(userId: string, limit = 50): Promise<LoginLogEntry[]> {
+  try {
+    const res = await api.get<{ logs: LoginLogEntry[] }>(`/api/v1/admin/users/${userId}/logins`, { params: { limit } });
+    return res.data.logs ?? [];
+  } catch (e) {
+    throw unwrapError(e);
+  }
+}
+
+export async function adminForceLogoutUser(userId: string): Promise<{ revoked: number }> {
+  try {
+    const res = await api.post<{ revoked: number }>(`/api/v1/admin/users/${userId}/force-logout`);
+    return res.data;
+  } catch (e) {
+    throw unwrapError(e);
+  }
+}
+
+export interface AdminPremiumNumber {
+  accountNo: string;
+  segmentNo: number;
+  claimed: boolean;
+  claimedBy?: string;
+  ownerName?: string;
+}
+
+export async function adminListPremiumNumbers(segment?: number, limit = 200): Promise<AdminPremiumNumber[]> {
+  try {
+    const res = await api.get<{ numbers: AdminPremiumNumber[] }>('/api/v1/admin/premium-numbers', { params: { segment, limit } });
+    return res.data.numbers ?? [];
+  } catch (e) {
+    throw unwrapError(e);
+  }
+}
+
+export async function adminGrantPremiumNumber(premiumNo: string, userAccountNo: string): Promise<{ newAccountNo: string; previousAccountNo: string }> {
+  try {
+    const res = await api.post<{ ok: boolean; newAccountNo: string; previousAccountNo: string }>(
+      `/api/v1/admin/premium-numbers/${premiumNo}/grant`,
+      { userAccountNo },
+    );
+    return res.data;
+  } catch (e) {
+    throw unwrapError(e);
+  }
+}
+
+export async function adminReleasePremiumNumber(premiumNo: string): Promise<void> {
+  try {
+    await api.post(`/api/v1/admin/premium-numbers/${premiumNo}/release`);
+  } catch (e) {
+    throw unwrapError(e);
+  }
+}
+
 export interface AdminLiveRoom {
   id: string;
   ownerId: string;
