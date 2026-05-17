@@ -289,6 +289,12 @@ func (h *Handler) recall(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
 		return
 	}
+	// Redact body BEFORE we fan out / respond. RedactRecalled mutates
+	// in place; the returned message + the wire event both end up with
+	// content={} so the recalled text never leaks to recipients (or
+	// back to the sender, who already knew it anyway — keeping the
+	// shape consistent across all paths simplifies the client UI).
+	RedactRecalled([]*Message{m})
 	// Fan-out recall event to every member of the conversation.
 	members, err := h.membersOf(c, m.ConversationID)
 	if err == nil {
