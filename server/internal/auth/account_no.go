@@ -12,86 +12,40 @@ import (
 // be assigned by random draw. These get is_locked=true in the pool and
 // stay in reserve for admin grants / premium sale.
 //
-// Rule of thumb: "would a Chinese user instantly recognise this as a
-// 靓号 worth bragging about?" Mathematical curiosities (palindromes
-// like 101101) get the same eye-roll as a random number — they're
-// out. We only lock patterns that are visually striking at a glance.
+// Single rule, by user spec: 4 or more identical trailing digits.
+// Captures everything Chinese users actually brag about — XX0000,
+// XX8888, XX6666 — and naturally subsumes the rarer extremes (all-same
+// 111111 has 4+ tail same; 5+ trailing like 100000 does too).
 //
-// Locked patterns:
-//   1. All-same digit:     111111, 222222, …            (1 per 10k)
-//   2. Strict ascending:   123456, 234567, 345678, 456789
-//   3. Strict descending:  987654, 876543, …
-//   4. 5+ consecutive same digits anywhere               (~10-20 per 10k)
+// Volume per 10k-segment: exactly 10 — one for each possible trailing
+// digit 0..9. Tiny fraction (0.1%) reserved aside for admin grants.
 //
-// Combined this is single-digits up to ~20 numbers per 10k-segment —
-// under 0.2%. Everything else (including "merely nice" patterns like
-// 4 consecutive same digits or trailing 000) stays in the random pool
-// so early users have a real chance of drawing something they'll love.
-// We can tighten later by running a sweep that locks unsold ones.
+// Math curiosities the user explicitly called "垃圾号" (palindromes
+// like 101101, strict ascending like 123456) are intentionally NOT
+// locked. If those should ever count as premium, add another rule
+// here — but the current one matches actual user perception.
 func isLockedPattern(n int64) bool {
 	s := strconv.FormatInt(n, 10)
 	if len(s) < 6 {
 		return false
 	}
-	return allSameDigit(s) ||
-		isStrictAscending(s) ||
-		isStrictDescending(s) ||
-		hasConsecutiveSame(s, 5)
+	return hasSameTail(s, 4)
 }
 
-func allSameDigit(s string) bool {
-	if s == "" {
+// hasSameTail reports whether the last n characters of s are the same
+// digit. `hasSameTail("101111", 4)` → true (last 4 are 1s).
+// `hasSameTail("100100", 4)` → false (last 4 are 0,1,0,0).
+func hasSameTail(s string, n int) bool {
+	if len(s) < n {
 		return false
 	}
-	for i := 1; i < len(s); i++ {
-		if s[i] != s[0] {
+	last := s[len(s)-1]
+	for i := len(s) - n; i < len(s)-1; i++ {
+		if s[i] != last {
 			return false
 		}
 	}
 	return true
-}
-
-// Strict ascending: every digit exactly 1 greater than the previous.
-// Catches 123456, 234567, 345678, 456789.
-func isStrictAscending(s string) bool {
-	for i := 1; i < len(s); i++ {
-		if s[i] != s[i-1]+1 {
-			return false
-		}
-	}
-	return true
-}
-
-// Strict descending: every digit exactly 1 less than the previous.
-// Catches 987654, 876543, …
-func isStrictDescending(s string) bool {
-	for i := 1; i < len(s); i++ {
-		if s[i-1] == 0 || s[i] != s[i-1]-1 {
-			return false
-		}
-	}
-	return true
-}
-
-
-// hasConsecutiveSame reports whether s contains a run of `minRun` or
-// more identical digits anywhere.
-func hasConsecutiveSame(s string, minRun int) bool {
-	if len(s) < minRun {
-		return false
-	}
-	run := 1
-	for i := 1; i < len(s); i++ {
-		if s[i] == s[i-1] {
-			run++
-			if run >= minRun {
-				return true
-			}
-		} else {
-			run = 1
-		}
-	}
-	return false
 }
 
 // EnsureSegmentPools initialises (idempotently) the account_no_pool
