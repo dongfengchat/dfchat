@@ -232,20 +232,141 @@ func (r *Repo) SetVisibility(ctx context.Context, id, ownerID int64, isTest bool
 	return rm, err
 }
 
-// SetLive flips a room into the live state (SRS on_publish hook).
+// SetLive flips a room into the live state (SRS on_publish hook). Also
+// resets per-broadcast counters (viewer_count, peak_viewers,
+// total_danmaku) so a re-broadcast on the same room doesn't carry
+// stats from the previous session. Guarded with status != 1 so a
+// duplicate on_publish doesn't reset started_at mid-stream and lie
+// about uptime.
 func (r *Repo) SetLive(ctx context.Context, id int64) error {
 	_, err := r.pool.Exec(ctx,
-		`UPDATE live_rooms SET status = 1, started_at = now(), ended_at = NULL,
-		                       viewer_count = 0
-		 WHERE id = $1`, id)
+		`UPDATE live_rooms
+		    SET status        = 1,
+		        started_at    = now(),
+		        ended_at      = NULL,
+		        viewer_count  = 0,
+		        peak_viewers  = 0,
+		        total_danmaku = 0
+		  WHERE id = $1
+		    AND status != 1`, id)
 	return err
 }
 
-// SetEnded marks a room as no longer broadcasting (SRS on_unpublish hook).
+// SetEnded marks a room as no longer broadcasting (SRS on_unpublish
+// hook). Finalizes peak_viewers (high-water-mark of viewer_count),
+// total_danmaku (counter is already accumulated by realtime), and
+// duration_seconds. After this the row is queryable for a recap UI
+// without scanning danmaku rows.
+//
+// Idempotent: the WHERE status=1 guards against double on_unpublish
+// from SRS's retry path (no-op rather than rewinding ended_at).
 func (r *Repo) SetEnded(ctx context.Context, id int64) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE live_rooms
+		   SET status            = 2,
+		       ended_at          = now(),
+		       duration_seconds  = COALESCE(EXTRACT(EPOCH FROM (now() - started_at))::INT, 0),
+		       peak_viewers      = GREATEST(peak_viewers, viewer_count),
+		       viewer_count      = 0,
+		       current_publish_client_id = NULL
+		 WHERE id = $1 AND status = 1`, id)
+	return err
+}
+
+// TryClaimPublisher atomically binds an SRS client_id to a stream key.
+// Used by the on_publish hook to lock the broadcast to the first
+// publisher that arrived — any subsequent publisher with the same
+// stream key but a different client_id is rejected (key-takeover
+// attack). Returns (true, room) if claimed, (false, room) if the slot
+// is already held by another client.
+//
+// The same client_id reconnecting (e.g. an SRS reload that re-issues
+// the hook with the same publisher) succeeds — that's a no-op rather
+// than a takeover.
+func (r *Repo) TryClaimPublisher(ctx context.Context, streamKey, clientID string) (claimed bool, rm *Room, err error) {
+	rm, err = r.FindByStreamKey(ctx, streamKey)
+	if err != nil {
+		return false, nil, err
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE live_rooms
+		   SET current_publish_client_id = $2
+		 WHERE id = $1
+		   AND (current_publish_client_id IS NULL OR current_publish_client_id = $2)`,
+		rm.ID, clientID)
+	if err != nil {
+		return false, rm, err
+	}
+	return tag.RowsAffected() == 1, rm, nil
+}
+
+// ReleasePublisher clears the publisher binding AND rotates the stream
+// key. Called from the on_unpublish hook. Rotation matters: by the
+// time the stream is over, the old key has likely been seen by
+// viewers (it's in the HLS URL) — if we don't rotate, the next time
+// the owner starts streaming, anyone with the old URL could push
+// before the legitimate owner does. After this call, the owner must
+// fetch the fresh key via /live/rooms/:id/owner.
+//
+// Returns the new key for logging convenience.
+func (r *Repo) ReleasePublisher(ctx context.Context, roomID int64) (string, error) {
+	newKey, err := genStreamKey()
+	if err != nil {
+		return "", err
+	}
+	_, err = r.pool.Exec(ctx, `
+		UPDATE live_rooms
+		   SET current_publish_client_id = NULL,
+		       stream_key                = $2
+		 WHERE id = $1`, roomID, newKey)
+	return newKey, err
+}
+
+// BumpDanmaku is the +1 counter for total_danmaku, used by the
+// realtime handler after a successful insert. Best-effort: failure
+// is logged not surfaced.
+func (r *Repo) BumpDanmaku(ctx context.Context, roomID int64) error {
 	_, err := r.pool.Exec(ctx,
-		`UPDATE live_rooms SET status = 2, ended_at = now() WHERE id = $1 AND status = 1`,
-		id)
+		`UPDATE live_rooms SET total_danmaku = total_danmaku + 1 WHERE id = $1`, roomID)
+	return err
+}
+
+// ActiveStreamKeys returns the stream_key of every room currently marked
+// status=1 (live). Used by the SRS reconcile loop to diff DB state vs
+// what SRS actually has and mark dead rooms ended.
+func (r *Repo) ActiveStreamKeys(ctx context.Context) (map[string]int64, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, stream_key FROM live_rooms WHERE status = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var id int64
+		var key string
+		if err := rows.Scan(&id, &key); err != nil {
+			return nil, err
+		}
+		out[key] = id
+	}
+	return out, rows.Err()
+}
+
+// ForceEnd is a no-guard SetEnded used by the SRS reconcile loop. It
+// flips status=2 and finalizes stats just like SetEnded, but doesn't
+// require status=1 (the row might already be a zombie). Public so
+// the cleanup goroutine can call it.
+func (r *Repo) ForceEnd(ctx context.Context, id int64) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE live_rooms
+		   SET status            = 2,
+		       ended_at          = COALESCE(ended_at, now()),
+		       duration_seconds  = COALESCE(EXTRACT(EPOCH FROM (now() - started_at))::INT, duration_seconds),
+		       peak_viewers      = GREATEST(peak_viewers, viewer_count),
+		       viewer_count      = 0,
+		       current_publish_client_id = NULL
+		 WHERE id = $1`, id)
 	return err
 }
 
@@ -562,16 +683,23 @@ func (r *Repo) MarkScheduledNotified(ctx context.Context, id int64) error {
 }
 
 // SetViewerCount is called by realtime when subscribers change. Total
-// views is bumped on first subscribe per user.
+// views is bumped on first subscribe per user. peak_viewers is also
+// nudged upward so the live-ended recap retains the high-water mark.
 func (r *Repo) SetViewerCount(ctx context.Context, roomID int64, count int, bumpTotal bool) error {
 	if bumpTotal {
-		_, err := r.pool.Exec(ctx,
-			`UPDATE live_rooms SET viewer_count = $2, total_views = total_views + 1
+		_, err := r.pool.Exec(ctx, `
+			UPDATE live_rooms
+			   SET viewer_count = $2,
+			       peak_viewers = GREATEST(peak_viewers, $2),
+			       total_views  = total_views + 1
 			 WHERE id = $1`, roomID, count)
 		return err
 	}
-	_, err := r.pool.Exec(ctx,
-		`UPDATE live_rooms SET viewer_count = $2 WHERE id = $1`, roomID, count)
+	_, err := r.pool.Exec(ctx, `
+		UPDATE live_rooms
+		   SET viewer_count = $2,
+		       peak_viewers = GREATEST(peak_viewers, $2)
+		 WHERE id = $1`, roomID, count)
 	return err
 }
 

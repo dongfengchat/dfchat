@@ -2,9 +2,11 @@ package live
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -42,23 +44,29 @@ func NewHandler(repo *Repo, issuer *auth.Issuer, bus *wsbus.Bus, rtmpURL, hlsURL
 func (h *Handler) AttachViewerSource(v ViewerSource) { h.viewers = v }
 
 func (h *Handler) Register(rg *gin.RouterGroup) {
-	// Public — list discovery, room detail (no stream key)
+	// Public — only the listings + non-test-room detail. Anything that
+	// touches a SPECIFIC room (viewers, danmaku history, recordings)
+	// used to be public and leaked test-mode privacy; now they all go
+	// through an auth-gated handler that also re-checks is_test.
 	rg.GET("/live/rooms", h.listLive)
 	rg.GET("/live/scheduled", h.listScheduled)
 	rg.GET("/live/rooms/:id", h.publicDetail)
-	rg.GET("/live/rooms/:id/recordings", h.recordings)
-	rg.GET("/live/rooms/:id/danmaku", h.recentDanmaku)
-	rg.GET("/live/rooms/:id/viewers", h.viewerList)
 
-	// Owner-only
+	// Authed — anything per-room beyond the public detail.
 	g := rg.Group("/live")
 	g.Use(middleware.RequireAuth(h.issuer))
+	g.GET("/rooms/:id/recordings", h.recordings)
+	g.GET("/rooms/:id/danmaku", h.recentDanmaku)
+	g.GET("/rooms/:id/viewers", h.viewerList)
+
+	// Owner-only writes.
 	g.POST("/rooms", h.create)
 	g.GET("/rooms/:id/owner", h.ownerDetail) // includes stream key + URLs
 	g.PATCH("/rooms/:id", h.update)
 	g.PATCH("/rooms/:id/visibility", h.setVisibility) // 试播 ↔ 公开
 	g.PATCH("/rooms/:id/schedule", h.setSchedule)     // 直播预告
 	g.POST("/rooms/:id/rotate-key", h.rotateKey)
+	g.POST("/rooms/:id/stop", h.stopLive) // owner force-stop
 	g.DELETE("/rooms/:id", h.deleteRoom)
 	g.GET("/mine", h.listMine)
 
@@ -74,8 +82,35 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	// Recordings (owner deletes)
 	g.DELETE("/recordings/:recId", h.deleteRecording)
 
-	// SRS HTTP hooks — protected by shared secret in URL path, not by JWT.
+	// SRS HTTP hooks — protected by:
+	//   1. nginx /api/v1/live/srs-hook/ allowlist (docker bridge IPs only)
+	//   2. constant-time shared-secret path comparison (LIVE_SRS_SECRET)
+	// Outside callers should always get 404 at nginx; the handler is a
+	// belt-and-braces.
 	rg.POST("/live/srs-hook/:secret", h.srsHook)
+}
+
+// accessRoomForAuthed loads the room and refuses if it's test-mode and
+// the caller isn't the owner. Centralizes the "private rooms shouldn't
+// leak via per-room endpoints" check. Returns the room on success or
+// writes an error response and returns nil.
+func (h *Handler) accessRoomForAuthed(c *gin.Context, callerID, roomID int64) *Room {
+	rm, err := h.repo.FindByID(c.Request.Context(), roomID)
+	if errors.Is(err, ErrNotFound) {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "room not found"})
+		return nil
+	}
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return nil
+	}
+	if rm.IsTest && rm.OwnerID != callerID {
+		// Same "pretend it doesn't exist" treatment as publicDetail so
+		// test-mode existence isn't probable by id-enumeration.
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "room not found"})
+		return nil
+	}
+	return rm
 }
 
 // --- public ---
@@ -124,9 +159,13 @@ func (h *Handler) publicDetail(c *gin.Context) {
 }
 
 func (h *Handler) recordings(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
 	id, ok := parseID(c.Param("id"))
 	if !ok {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	if h.accessRoomForAuthed(c, uid, id) == nil {
 		return
 	}
 	recs, err := h.repo.Recordings(c.Request.Context(), id)
@@ -144,6 +183,13 @@ type createReq struct {
 	Category string `json:"category"`
 }
 
+// maxRoomsPerOwner caps how many live rooms a single account can own
+// at once. Without this, one user can create thousands of rooms (each
+// gets a stream key, a follower table entry on join, scheduled-reminder
+// fanout potential) — both spam vector and disk footprint. 10 is
+// generous (legit creators rarely keep more than 3-4 stale rooms).
+const maxRoomsPerOwner = 10
+
 func (h *Handler) create(c *gin.Context) {
 	uid := c.MustGet("userID").(int64)
 	var req createReq
@@ -156,6 +202,22 @@ func (h *Handler) create(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80021, "message": "title 1-128 chars"})
 		return
 	}
+	if cat := strings.TrimSpace(req.Category); len(cat) > 32 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80027, "message": "category too long"})
+		return
+	}
+	// Per-owner concurrent room cap. ListMine is the source of truth
+	// for "rooms this user owns" — we count them rather than keep a
+	// counter, since rooms get deleted and we don't want drift.
+	mine, err := h.repo.ListMine(c.Request.Context(), uid)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	if len(mine) >= maxRoomsPerOwner {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"code": 80029, "message": fmt.Sprintf("最多 %d 个直播间，请先删除一些旧的", maxRoomsPerOwner)})
+		return
+	}
 	rm, err := h.repo.Create(c.Request.Context(), uid, title, strings.TrimSpace(req.Category))
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
@@ -166,6 +228,29 @@ func (h *Handler) create(c *gin.Context) {
 		"rtmpUrl":     fmt.Sprintf("%s/%s", h.rtmpURL, rm.StreamKey),
 		"playbackUrl": h.playbackURLFor(rm),
 	})
+}
+
+// isOurMediaURL enforces that user-provided media URLs (cover, avatar)
+// resolve to our own MinIO public host. Stops an owner from setting a
+// cover_url like https://evil.example/track.gif which would silently
+// beacon every viewer's IP / user-agent to a third party.
+func isOurMediaURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return false
+	}
+	// Accept files.dfchat.chat (prod) and any localhost-y host (dev).
+	host := strings.ToLower(u.Hostname())
+	if host == "files.dfchat.chat" {
+		return true
+	}
+	if host == "localhost" || host == "127.0.0.1" || strings.HasPrefix(host, "minio") {
+		return true
+	}
+	return false
 }
 
 // ownerDetail returns the full room incl. stream key + push/pull URLs.
@@ -214,6 +299,27 @@ func (h *Handler) update(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "invalid body"})
 		return
+	}
+	if req.Title != nil {
+		t := strings.TrimSpace(*req.Title)
+		if t == "" || len(t) > 128 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80021, "message": "title 1-128 chars"})
+			return
+		}
+		req.Title = &t
+	}
+	if req.Category != nil && len(*req.Category) > 32 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80027, "message": "category too long"})
+		return
+	}
+	// Cover URL must point at our public MinIO host so it can't be used
+	// as a tracker pixel pointing at attacker infra. Empty / null is
+	// fine (removes the cover).
+	if req.CoverURL != nil && *req.CoverURL != "" {
+		if !isOurMediaURL(*req.CoverURL) {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80028, "message": "封面图必须来自 files.dfchat.chat"})
+			return
+		}
 	}
 	rm, err := h.repo.UpdateMeta(c.Request.Context(), id, uid, req.Title, req.Category, req.CoverURL)
 	if errors.Is(err, ErrNotOwner) {
@@ -296,7 +402,67 @@ func (h *Handler) deleteRoom(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
 		return
 	}
+	// Tell any active viewers their room is gone so the player tears
+	// down + the danmaku WS unsubscribes cleanly. The realtime handler
+	// already cleans liveSubs on disconnect, but viewers still on the
+	// page would otherwise keep polling HLS for a 404.
+	h.broadcastRoomDeleted(c.Request.Context(), id)
 	c.Status(http.StatusNoContent)
+}
+
+// stopLive lets the owner manually mark a broadcast ended without
+// relying on SRS to notice the publisher disappeared. Critical for
+// "OBS crashed silently" — without this the room stays status=1
+// (live) forever and shows up in Discover with viewer_count stale.
+//
+// Doesn't actually disconnect the SRS publisher (we'd need to call
+// SRS HTTP API for that, future work). Just flips the DB state and
+// fans out a "live ended" event. If SRS still has a publisher pushing,
+// the next on_publish hook will re-set status=1 — which is fine, it
+// just means the broadcast continues and the manual stop was a no-op.
+func (h *Handler) stopLive(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, ok := parseID(c.Param("id"))
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	rm, err := h.repo.FindByID(c.Request.Context(), id)
+	if errors.Is(err, ErrNotFound) {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "room not found"})
+		return
+	}
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	if rm.OwnerID != uid {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 80012, "message": "not the owner"})
+		return
+	}
+	_ = h.repo.SetEnded(c.Request.Context(), id)
+	_, _ = h.repo.ReleasePublisher(c.Request.Context(), id) // rotate key
+	if h.bus != nil && !rm.IsTest {
+		h.notifyFollowersOffline(c.Request.Context(), rm)
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// broadcastRoomDeleted fans a one-shot "this room is gone" event to
+// every currently-subscribed viewer (per the in-memory WS subscriber
+// set). Used by deleteRoom — also fine to be called pre-emptively
+// from any other tear-down path (e.g. SRS reconcile if a room's
+// stream key looks orphaned).
+func (h *Handler) broadcastRoomDeleted(_ context.Context, roomID int64) {
+	if h.bus == nil || h.viewers == nil {
+		return
+	}
+	roomKey := strconv.FormatInt(roomID, 10)
+	viewers := h.viewers.LiveViewerIDs(roomKey)
+	payload := map[string]any{"roomId": roomKey}
+	for _, uid := range viewers {
+		h.bus.Publish(uid, wsbus.Event{Type: "live.room.deleted", Payload: payload})
+	}
 }
 
 func (h *Handler) listMine(c *gin.Context) {
@@ -330,7 +496,12 @@ type srsHookPayload struct {
 }
 
 func (h *Handler) srsHook(c *gin.Context) {
-	if c.Param("secret") != h.srsSecret {
+	// Constant-time secret compare — Param() returns user input and
+	// `!=` short-circuits, leaking a tiny timing signal. subtle.
+	// ConstantTimeCompare needs equal-length slices, so check length
+	// first.
+	got := c.Param("secret")
+	if len(got) != len(h.srsSecret) || subtle.ConstantTimeCompare([]byte(got), []byte(h.srsSecret)) != 1 {
 		c.String(http.StatusUnauthorized, "1")
 		return
 	}
@@ -339,39 +510,76 @@ func (h *Handler) srsHook(c *gin.Context) {
 		c.String(http.StatusBadRequest, "1")
 		return
 	}
-	// Transcoded variants (e.g. <streamKey>_ld) are SRS pushing back into
-	// itself for the 480p ladder — bypass DB lookup and approve them,
-	// otherwise transcode loops can't establish.
-	if strings.HasSuffix(p.Stream, "_ld") || strings.HasSuffix(p.Stream, "_md") {
+
+	// Transcoded variants (`<key>_ld` 480p, `<key>_md` ~720p) are SRS
+	// pushing back into itself for the bitrate ladder. We must approve
+	// or the transcoder loops can't establish — BUT we still verify
+	// the base stream key exists in our DB. Without this check, a
+	// malicious RTMP publisher can push to `arbitrary_ld` and SRS
+	// approves the relay (transcoded variants don't go through DB
+	// lookup in the old code), giving anyone free CDN hosting +
+	// publishable HLS at /hls/arbitrary_ld.m3u8.
+	stream := p.Stream
+	if base, ok := strings.CutSuffix(stream, "_ld"); ok {
+		stream = base
+	} else if base, ok := strings.CutSuffix(stream, "_md"); ok {
+		stream = base
+	}
+	if stream != p.Stream {
+		// Transcoded variant — verify the base key is real, then approve.
+		if _, err := h.repo.FindByStreamKey(c.Request.Context(), stream); err != nil {
+			c.String(http.StatusForbidden, "1")
+			return
+		}
 		c.String(http.StatusOK, "0")
 		return
 	}
-	rm, err := h.repo.FindByStreamKey(c.Request.Context(), p.Stream)
-	if err != nil {
-		// Unknown stream key → reject (SRS will close the publisher).
-		c.String(http.StatusForbidden, "1")
-		return
-	}
+
 	switch p.Action {
 	case "on_publish":
+		// Atomically bind the stream key to this SRS client_id. If the
+		// slot is already taken by another client we reject — second
+		// publisher with a leaked key gets "publisher already active".
+		// Same-client reconnects succeed (idempotent).
+		claimed, rm, err := h.repo.TryClaimPublisher(c.Request.Context(), p.Stream, p.ClientID)
+		if err != nil || rm == nil {
+			c.String(http.StatusForbidden, "1")
+			return
+		}
+		if !claimed {
+			c.String(http.StatusForbidden, "1")
+			return
+		}
 		_ = h.repo.SetLive(c.Request.Context(), rm.ID)
 		// Don't notify followers about a test-mode (host-only) broadcast.
 		if h.bus != nil && !rm.IsTest {
 			h.notifyFollowersGoLive(c.Request.Context(), rm)
 		}
+
 	case "on_unpublish":
+		rm, err := h.repo.FindByStreamKey(c.Request.Context(), p.Stream)
+		if err != nil {
+			// Stream key already rotated / room gone — nothing to do.
+			c.String(http.StatusOK, "0")
+			return
+		}
+		// Finalize stats first (uses started_at, viewer_count) BEFORE
+		// rotating the key — order matters since both touch the row.
 		_ = h.repo.SetEnded(c.Request.Context(), rm.ID)
+		// Rotate the stream key so any viewer who learned it from the
+		// HLS URL can't push to it on the next broadcast.
+		_, _ = h.repo.ReleasePublisher(c.Request.Context(), rm.ID)
 		if h.bus != nil && !rm.IsTest {
 			h.notifyFollowersOffline(c.Request.Context(), rm)
 		}
+
 	case "on_dvr":
-		// p.File is something like "./objs/nginx/html/live/<key>.mp4"
-		// We don't move it to MinIO here — a worker / cron can sweep
-		// the dvr dir later. For now just persist the file path so
-		// recordings list can show "available, processing".
-		if p.File != "" {
-			_ = h.repo.RecordRecording(c.Request.Context(), rm.ID, p.File, 0, 0)
-		}
+		// DVR is disabled in srs.conf (see comment there). Even if
+		// someone enables it, the previous code stored the SRS local
+		// file path — which is world-readable through nginx /hls/.
+		// Drop on the floor; if DVR comes back, route to a private
+		// MinIO bucket instead of trusting SRS's public dir.
+		// (Approve so SRS doesn't retry endlessly.)
 	}
 	c.String(http.StatusOK, "0")
 }
@@ -380,10 +588,17 @@ func (h *Handler) srsHook(c *gin.Context) {
 // WS danmaku channel — i.e. who is actively watching. We return only IDs
 // (string form) and a count; the client can hydrate names from the friend
 // list / group member info it already has.
+//
+// Authed + test-mode-gated so private preview rooms don't leak who's
+// watching them. The owner can always see their own room's viewer list.
 func (h *Handler) viewerList(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
 	id, ok := parseID(c.Param("id"))
 	if !ok {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	if h.accessRoomForAuthed(c, uid, id) == nil {
 		return
 	}
 	roomKey := strconv.FormatInt(id, 10)
@@ -569,12 +784,19 @@ func (h *Handler) followStatus(c *gin.Context) {
 // =============== Persisted danmaku ===============
 
 func (h *Handler) recentDanmaku(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
 	id, ok := parseID(c.Param("id"))
 	if !ok {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
 		return
 	}
+	if h.accessRoomForAuthed(c, uid, id) == nil {
+		return
+	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	if limit < 1 || limit > 500 {
+		limit = 50
+	}
 	items, err := h.repo.RecentDanmaku(c.Request.Context(), id, limit)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
@@ -684,6 +906,18 @@ func (h *Handler) setSchedule(c *gin.Context) {
 		parsed, err := time.Parse(time.RFC3339, *req.ScheduledAt)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80025, "message": "scheduledAt must be RFC3339"})
+			return
+		}
+		// Bound the window: must be in the future (not retroactive)
+		// and within 60 days (no year-9999 schedules that sit forever).
+		// 5-min grace on the lower bound for clock skew between client/server.
+		now := time.Now()
+		if parsed.Before(now.Add(-5 * time.Minute)) {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80026, "message": "scheduledAt 必须是将来的时间"})
+			return
+		}
+		if parsed.After(now.Add(60 * 24 * time.Hour)) {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80026, "message": "scheduledAt 最多提前 60 天"})
 			return
 		}
 		t = &parsed

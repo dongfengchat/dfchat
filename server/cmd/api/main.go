@@ -113,6 +113,11 @@ func main() {
 	liveHandler.AttachViewerSource(realtimeHandler)
 	// Background goroutine pushes reminders 0-10 min before scheduled streams.
 	liveHandler.RunScheduledReminderLoop(ctx)
+	// Background reconciler: polls SRS /api/v1/streams every 60 s and
+	// marks any DB row "live" that SRS doesn't actually have a publisher
+	// for as ended. Catches the "OBS crashed mid-stream + on_unpublish
+	// callback was lost" + "SRS container restarted" zombie cases.
+	go live.RunSRSReconcileLoop(ctx, liveRepo, cfg.SRSAPIBaseURL, log)
 	// Background sweeper: drops unverified accounts > 14 days old and GCs
 	// expired email-verify / password-reset tokens / draw selections.
 	// Runs hourly.

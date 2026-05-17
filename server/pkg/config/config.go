@@ -104,6 +104,14 @@ func Load() (*Config, error) {
 	if len(cfg.JWTSecret) < 32 {
 		return nil, fmt.Errorf("JWT_SECRET must be at least 32 bytes")
 	}
+	// SRS callback authenticator: SRS hits /api/v1/live/srs-hook/<secret>
+	// with the secret in the URL path. An empty default would silently
+	// fail-open (both sides empty → equal → authorised), letting anyone
+	// on the internet spoof on_publish / on_unpublish / on_dvr hooks
+	// and remote-kill live streams. Refuse to boot on weak config.
+	if len(cfg.LiveSRSSecret) < 32 {
+		return nil, fmt.Errorf("LIVE_SRS_SECRET must be at least 32 chars (got %d) — SRS callback auth is fail-open otherwise", len(cfg.LiveSRSSecret))
+	}
 
 	return cfg, nil
 }

@@ -27,6 +27,7 @@ type LiveBackend interface {
 	InsertDanmaku(ctx context.Context, roomID, senderID int64, content, color string) error
 	SetViewerCount(ctx context.Context, roomID int64, count int, bumpTotal bool) error
 	IsBanned(ctx context.Context, roomID, userID int64) (banned, isKick bool, err error)
+	BumpDanmaku(ctx context.Context, roomID int64) error
 }
 
 // RelayBackend gates peer-to-peer WS-relayed messages (WebRTC signaling
@@ -448,7 +449,27 @@ func (h *Handler) handleLiveDanmaku(userID int64, env clientEnvelope) {
 		return // skip empty / oversized; full sanitisation is a later concern
 	}
 
-	// Ban check before doing any work.
+	// Sender must be currently subscribed to this room's danmaku
+	// channel. Without this check a malicious client can blast
+	// danmaku to ANY roomId it knows (even private test-mode rooms)
+	// just by sending the WS event with the right payload — bypasses
+	// the implicit "must have joined the room to talk" gate.
+	h.liveMu.Lock()
+	subs, exists := h.liveSubs[p.RoomID]
+	subscribed := false
+	if exists {
+		_, subscribed = subs[userID]
+	}
+	h.liveMu.Unlock()
+	if !subscribed {
+		h.bus.Publish(userID, wsbus.Event{
+			Type:    "live.danmaku.rejected",
+			Payload: map[string]any{"roomId": p.RoomID, "reason": "not_subscribed"},
+		})
+		return
+	}
+
+	// Ban check before doing any persistent work.
 	if h.live != nil {
 		if roomID, err := strconv.ParseInt(p.RoomID, 10, 64); err == nil {
 			banned, _, _ := h.live.IsBanned(context.Background(), roomID, userID)
@@ -459,8 +480,11 @@ func (h *Handler) handleLiveDanmaku(userID int64, env clientEnvelope) {
 				})
 				return
 			}
-			// Persist (best effort — failure doesn't block broadcast).
+			// Persist + bump the per-room counter so the live-ended
+			// recap can show "总弹幕 N" without scanning live_danmaku.
+			// Both best-effort — failure here mustn't block broadcast.
 			_ = h.live.InsertDanmaku(context.Background(), roomID, userID, text, p.Color)
+			_ = h.live.BumpDanmaku(context.Background(), roomID)
 		}
 	}
 
