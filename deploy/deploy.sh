@@ -64,8 +64,16 @@ rsync -az --delete --inplace \
   --exclude '.DS_Store' \
   --exclude '.env' \
   --exclude '.env.*' \
+  --exclude '/web/' \
+  --exclude '/web' \
   -e "$RSYNC_RSH" \
   ./ "${USER}@${HOST}:${REMOTE_DIR}/"
+# /web/ exclusion above is CRITICAL: the project's local web/ tree is
+# the static marketing site source, but /opt/dfchat/web/ on the server
+# also holds /download/<binary> installers managed by release.sh /
+# upload-binary.sh. Without this exclude, --delete wipes those binaries
+# every deploy. To push website content changes, run setup-website.sh
+# explicitly — it knows to exclude /download/ when it rsyncs.
 
 # Place the generated .env at the expected location on the server.
 $SSH "cp ${REMOTE_DIR}/deploy/.env.prod ${REMOTE_DIR}/.env && chmod 600 ${REMOTE_DIR}/.env"
