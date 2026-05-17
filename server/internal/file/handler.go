@@ -142,6 +142,16 @@ func (h *Handler) uploadToken(c *gin.Context) {
 			fail(c, http.StatusRequestEntityTooLarge, 40013, "image too large (max 20MB)")
 			return
 		}
+		// Tighten the mime check for image uploads: prevent uploading an
+		// .exe (or anything non-image) under kind=image, where the .png
+		// extension and `Content-Type: image/png` could later fool the
+		// browser into rendering whatever the attacker put in there.
+		// The "file" kind below has no such check by design — generic
+		// file attachments may have any mime.
+		if req.Mime != "" && !strings.HasPrefix(strings.ToLower(req.Mime), "image/") {
+			fail(c, http.StatusBadRequest, 40016, "image kind requires image/* mime")
+			return
+		}
 	case "file", "":
 		if req.Size > maxFileBytes {
 			fail(c, http.StatusRequestEntityTooLarge, 40014, "file too large (max 100MB)")

@@ -3,6 +3,7 @@ package message
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -71,7 +72,12 @@ func validateContent(typ string, raw json.RawMessage) error {
 		if err := json.Unmarshal(raw, &body); err != nil {
 			return errContentBadJSON
 		}
-		if body.Text == "" {
+		// Treat whitespace-only text the same as empty — otherwise a
+		// client (or a user spamming Enter) can send invisible messages
+		// that look blank in the conversation view but still bump unread
+		// counts and trigger notifications. strings.TrimSpace covers
+		// ASCII whitespace AND unicode whitespace (per Go's def).
+		if strings.TrimSpace(body.Text) == "" {
 			return errTextEmpty
 		}
 		if !utf8.ValidString(body.Text) {
