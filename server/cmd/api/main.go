@@ -101,7 +101,7 @@ func main() {
 	fileHandler := file.NewHandler(fileRepo, storageClient, issuer)
 	adminHandler := admin.NewHandler(pool, issuer, auditor)
 	searchHandler := search.NewHandler(pool, issuer)
-	liveHandler := live.NewHandler(liveRepo, issuer, bus, cfg.LiveRTMPURL, cfg.LiveHLSURL, cfg.LiveSRSSecret)
+	liveHandler := live.NewHandler(liveRepo, issuer, bus, cfg.LiveRTMPURL, cfg.LiveHLSURL, cfg.LiveSRSSecret, cfg.SRSInternalHTTP)
 	// relayAdapter implements realtime.RelayBackend: a relay (WebRTC
 	// signaling, typing) is allowed iff sender and recipient are friends
 	// or share at least one group. This keeps strangers from initiating

@@ -36,7 +36,8 @@ type Config struct {
 	LiveRTMPURL    string // shown to streamer, e.g. rtmp://dfchat.chat/live
 	LiveHLSURL     string // shown to viewer,   e.g. https://dfchat.chat/hls
 	LiveSRSSecret  string // shared with SRS HTTP callbacks
-	SRSAPIBaseURL  string // server-side health probe URL, e.g. http://srs:1985/api/v1/summaries
+	SRSAPIBaseURL   string // server-side health probe URL, e.g. http://srs:1985/api/v1/summaries
+	SRSInternalHTTP string // internal SRS HTTP server (HLS files), e.g. http://srs:8080 — used by api to proxy + rewrite m3u8 for signed playback
 
 	// coturn TURN server (WebRTC fallback for symmetric NAT).
 	TurnSecret     string // shared --static-auth-secret with coturn
@@ -80,10 +81,11 @@ func Load() (*Config, error) {
 		MinioPublicURL: getEnv("MINIO_PUBLIC_URL", "http://localhost:9000"),
 		MinioUseSSL:    getEnv("MINIO_USE_SSL", "false") == "true",
 
-		LiveRTMPURL:   getEnv("LIVE_RTMP_URL", "rtmp://localhost:1935/live"),
-		LiveHLSURL:    getEnv("LIVE_HLS_URL", "http://localhost:8088/live"),
-		LiveSRSSecret: getEnv("LIVE_SRS_SECRET", ""),
-		SRSAPIBaseURL: getEnv("SRS_API_BASE_URL", ""),
+		LiveRTMPURL:     getEnv("LIVE_RTMP_URL", "rtmp://localhost:1935/live"),
+		LiveHLSURL:      getEnv("LIVE_HLS_URL", "http://localhost:8088/live"),
+		LiveSRSSecret:   getEnv("LIVE_SRS_SECRET", ""),
+		SRSAPIBaseURL:   getEnv("SRS_API_BASE_URL", ""),
+		SRSInternalHTTP: getEnv("SRS_INTERNAL_HTTP", "http://srs:8080"),
 
 		TurnSecret:     getEnv("TURN_SECRET", ""),
 		TurnHost:       getEnv("TURN_HOST", ""),

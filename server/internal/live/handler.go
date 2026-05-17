@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,17 +26,18 @@ type ViewerSource interface {
 }
 
 type Handler struct {
-	repo      *Repo
-	issuer    *auth.Issuer
-	bus       *wsbus.Bus   // fan-out go-live / room-updated to followers + viewers
-	viewers   ViewerSource // nil-safe; nil disables /viewers endpoint
-	rtmpURL   string       // e.g. rtmp://dfchat.chat/live   (shown to streamer)
-	hlsURL    string       // e.g. https://dfchat.chat/hls    (shown to viewer)
-	srsSecret string       // shared secret used by SRS hooks (configured in srs.conf)
+	repo        *Repo
+	issuer      *auth.Issuer
+	bus         *wsbus.Bus   // fan-out go-live / room-updated to followers + viewers
+	viewers     ViewerSource // nil-safe; nil disables /viewers endpoint
+	rtmpURL     string       // e.g. rtmp://dfchat.chat/live   (shown to streamer)
+	hlsURL      string       // e.g. https://dfchat.chat/hls    (shown to viewer)
+	srsSecret   string       // shared secret used by SRS hooks (configured in srs.conf)
+	srsInternal string       // internal SRS HTTP base, e.g. http://srs:8080 — used to fetch raw m3u8
 }
 
-func NewHandler(repo *Repo, issuer *auth.Issuer, bus *wsbus.Bus, rtmpURL, hlsURL, srsSecret string) *Handler {
-	return &Handler{repo: repo, issuer: issuer, bus: bus, rtmpURL: rtmpURL, hlsURL: hlsURL, srsSecret: srsSecret}
+func NewHandler(repo *Repo, issuer *auth.Issuer, bus *wsbus.Bus, rtmpURL, hlsURL, srsSecret, srsInternal string) *Handler {
+	return &Handler{repo: repo, issuer: issuer, bus: bus, rtmpURL: rtmpURL, hlsURL: hlsURL, srsSecret: srsSecret, srsInternal: srsInternal}
 }
 
 // AttachViewerSource is called from main.go *after* realtime is built — the
@@ -88,6 +90,12 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	// Outside callers should always get 404 at nginx; the handler is a
 	// belt-and-braces.
 	rg.POST("/live/srs-hook/:secret", h.srsHook)
+
+	// Internal HLS auth + playlist proxy. Reachable only via nginx
+	// auth_request / proxy_pass from the public /hls/ block; nginx
+	// restricts the path so external callers never see it. No JWT.
+	rg.GET("/live/play-auth", h.playAuth)
+	rg.GET("/live/play-m3u8", h.playM3U8)
 }
 
 // accessRoomForAuthed loads the room and refuses if it's test-mode and
@@ -947,10 +955,160 @@ func (h *Handler) playbackURLFor(rm *Room) string {
 	// HLS m3u8 lives at <hlsURL>/<streamKey>.m3u8 (SRS default URL shape).
 	// For idle/ended rooms the URL is still returned so the client can
 	// pre-build the player; SRS will 404 until the stream goes live.
+	//
+	// The URL carries an HMAC-signed token + exp that nginx validates
+	// via auth_request for every m3u8 / ts fetch. Without this, anyone
+	// who learned the URL once could watch forever — including for
+	// test-mode rooms (we have no on_play hook in SRS to gate access
+	// there, so the API-issued URL IS the capability).
 	if rm == nil {
 		return ""
 	}
-	// Public detail strips the stream key, so use the same identifier.
-	// Compute against the stored key (preserved here at the repo layer).
-	return fmt.Sprintf("%s/%s.m3u8", strings.TrimRight(h.hlsURL, "/"), rm.StreamKey)
+	tok, exp := signPlayToken(rm.StreamKey, h.srsSecret, time.Now())
+	return fmt.Sprintf("%s/%s.m3u8?token=%s&exp=%d",
+		strings.TrimRight(h.hlsURL, "/"), rm.StreamKey, tok, exp)
+}
+
+// playAuth is the internal endpoint nginx hits via auth_request to
+// validate every /hls/* request. nginx forwards the original ?token=&exp=
+// query string + sets the X-Play-Stream-Key header to the captured
+// stream key portion of the URL.
+//
+// Returns 200 if the signature is valid AND not expired, 401 otherwise.
+// Response body is intentionally empty — nginx only looks at the status.
+//
+// Reachability is restricted to the docker bridge by nginx (same
+// allowlist as /api/v1/live/srs-hook/) so this never appears on the
+// public internet. The handler is registered on the un-authed routegroup
+// because nginx is the only caller and JWT would be meaningless.
+func (h *Handler) playAuth(c *gin.Context) {
+	streamKey := c.GetHeader("X-Play-Stream-Key")
+	if streamKey == "" {
+		streamKey = c.Query("stream")
+	}
+	if streamKey == "" {
+		c.String(http.StatusUnauthorized, "")
+		return
+	}
+	token := c.Query("token")
+	exp := c.Query("exp")
+	if err := verifyPlayToken(streamKey, h.srsSecret, token, exp, time.Now()); err != nil {
+		c.String(http.StatusUnauthorized, "")
+		return
+	}
+	c.String(http.StatusOK, "")
+}
+
+// playM3U8 fetches the playlist from SRS internally, rewrites each
+// segment URL to carry the same signed-token query string, and serves
+// the result back to the viewer. Without this rewrite the HLS player
+// would request ts files with no query string and nginx would reject
+// them — HLS players don't propagate the playlist URL's query to
+// segment URLs.
+//
+// We do NOT extend the token's TTL here — the rewritten URLs carry the
+// SAME (token, exp) tuple as the originating request. That keeps a
+// single playback session bounded by the token TTL the client received
+// in publicDetail; once exp passes, both the playlist and its segments
+// stop working and the client must refetch the URL.
+func (h *Handler) playM3U8(c *gin.Context) {
+	streamKey := c.Query("stream")
+	token := c.Query("token")
+	exp := c.Query("exp")
+	if err := verifyPlayToken(streamKey, h.srsSecret, token, exp, time.Now()); err != nil {
+		c.String(http.StatusUnauthorized, "")
+		return
+	}
+	upstream := strings.TrimRight(h.srsInternal, "/") + "/live/" + streamKey + ".m3u8"
+	req, err := http.NewRequestWithContext(c.Request.Context(), "GET", upstream, nil)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "")
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.String(http.StatusBadGateway, "")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 404 {
+		// Stream not yet live — propagate the 404 so the client
+		// shows "offline" rather than a bogus playlist.
+		c.String(http.StatusNotFound, "")
+		return
+	}
+	if resp.StatusCode != 200 {
+		c.String(http.StatusBadGateway, "")
+		return
+	}
+	body, err := readAll(resp)
+	if err != nil {
+		c.String(http.StatusBadGateway, "")
+		return
+	}
+	rewritten := appendTokenToSegments(string(body), token, exp)
+	c.Header("Content-Type", "application/vnd.apple.mpegurl")
+	c.Header("Cache-Control", "no-cache")
+	c.String(http.StatusOK, rewritten)
+}
+
+// appendTokenToSegments walks the playlist line-by-line and appends
+// ?token=&exp= to each non-comment, non-tag entry (i.e. ts segment
+// references). Preserves any existing query (SRS doesn't add one, but
+// future-proof). Order of operations: if line already has ? we use &.
+func appendTokenToSegments(playlist, token, exp string) string {
+	q := "token=" + token + "&exp=" + exp
+	out := make([]byte, 0, len(playlist)+256)
+	for len(playlist) > 0 {
+		var line string
+		if i := strings.IndexByte(playlist, '\n'); i >= 0 {
+			line = playlist[:i+1]
+			playlist = playlist[i+1:]
+		} else {
+			line = playlist
+			playlist = ""
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+		// Skip blank lines and HLS directives (#EXTM3U / #EXTINF / etc).
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			out = append(out, line...)
+			continue
+		}
+		// A media segment line. Append the token, preserving any newline.
+		sep := "?"
+		if strings.Contains(trimmed, "?") {
+			sep = "&"
+		}
+		out = append(out, trimmed...)
+		out = append(out, sep...)
+		out = append(out, q...)
+		// Re-attach the trailing newline (if any).
+		if len(line) > len(trimmed) {
+			out = append(out, line[len(trimmed):]...)
+		}
+	}
+	return string(out)
+}
+
+func readAll(resp *http.Response) ([]byte, error) {
+	const maxPlaylistSize = 1 << 20 // 1 MB — a normal m3u8 is < 10 KB
+	r := http.MaxBytesReader(nil, resp.Body, maxPlaylistSize)
+	return ioReadAll(r)
+}
+
+func ioReadAll(r io.Reader) ([]byte, error) {
+	b := make([]byte, 0, 8192)
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			b = append(b, buf[:n]...)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return b, nil
+			}
+			return nil, err
+		}
+	}
 }

@@ -113,9 +113,13 @@ export default function Admin() {
   }
 
   return (
-    <div className="min-h-screen bg-bg-1 text-ink-1">
+    // h-screen + flex column so the title bar stays pinned and only the
+    // inner content scrolls. Previous min-h-screen let the whole page
+    // grow with content, scrolling the TitleBar (and the macOS traffic
+    // lights / window-drag region with it) off-screen.
+    <div className="h-screen flex flex-col bg-bg-1 text-ink-1">
       <TitleBar title="东风快信 · 管理后台" />
-      <header className="h-14 px-6 border-b border-bg-5/40 bg-bg-2/60 backdrop-blur flex items-center gap-3">
+      <header className="h-14 px-6 border-b border-bg-5/40 bg-bg-2/60 backdrop-blur flex items-center gap-3 shrink-0">
         <button onClick={() => navigate('/home')} className="btn-icon" title="返回">
           <ArrowLeft size={18} />
         </button>
@@ -124,6 +128,7 @@ export default function Admin() {
         <div className="text-xs text-ink-3 ml-2">@{me?.username}</div>
       </header>
 
+      <div className="flex-1 min-h-0 overflow-y-auto">
       {error ? (
         <div className="p-6 text-accent-red">{error}</div>
       ) : (

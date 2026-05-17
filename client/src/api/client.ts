@@ -335,6 +335,15 @@ export async function deleteLiveRoom(id: string): Promise<void> {
   try { await api.delete(`/api/v1/live/rooms/${id}`); } catch (e) { throw unwrapError(e); }
 }
 
+// stopLiveRoom flips the room into "ended" state without deleting it.
+// Used when the host wants to manually end a broadcast — useful if
+// OBS crashed silently and SRS never fired the on_unpublish hook,
+// leaving the room stuck at status=1. Also rotates the stream key on
+// the server so any leaked URL can't be repushed.
+export async function stopLiveRoom(id: string): Promise<void> {
+  try { await api.post(`/api/v1/live/rooms/${id}/stop`); } catch (e) { throw unwrapError(e); }
+}
+
 // Flip a room between test-broadcast (host-only) and public (in discover).
 // New rooms default to isTest=true; the owner publishes by passing false.
 // === Group polish ===

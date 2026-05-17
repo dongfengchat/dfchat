@@ -83,6 +83,34 @@ services:
         sed "s|\$${LIVE_SRS_HOOK_URL}|$$LIVE_SRS_HOOK_URL|g" \
           /usr/local/srs/conf/dfchat.conf.tmpl \
           > /usr/local/srs/conf/dfchat.conf
+        # Background ts/mp4 sweeper. SRS only cleans HLS segments on a
+        # clean stream end; if SRS crashes or kill -9 mid-stream, the
+        # ts files linger forever (~19 GB/wk per active stream). Every
+        # 30 min, drop any .ts / .mp4 under live/ that wasn't touched
+        # in the last hour AND whose owning stream isn't currently
+        # publishing (checked via SRS HTTP API). Idempotent — safe to
+        # run with SRS still serving live segments.
+        (
+          while sleep 1800; do
+            now=$$(date +%s)
+            # Active stream names from SRS HTTP API. The grep -o regex
+            # extracts each "name":"<key>" value; xargs flattens to one
+            # name per line for the grep -v exclusion below.
+            active=$$(wget -qO- http://127.0.0.1:1985/api/v1/streams 2>/dev/null \
+                      | grep -o '"name":"[^"]*"' \
+                      | sed 's/"name":"\(.*\)"/\1/' \
+                      | tr "\n" "|" | sed 's/|$$//')
+            find /usr/local/srs/objs/nginx/html/live -type f \
+              \( -name '*.ts' -o -name '*.mp4' -o -name '*.m3u8' \) \
+              -mmin +60 -print 2>/dev/null | while read f; do
+                base=$$(basename "$$f" | sed 's/\.[^.]*$$//' | sed 's/-[0-9]*$$//')
+                if [ -n "$$active" ] && echo "$$base" | grep -Eq "^($$active)$$"; then
+                  continue
+                fi
+                rm -f -- "$$f"
+              done
+          done
+        ) &
         exec ./objs/srs -c conf/dfchat.conf
     environment:
       LIVE_SRS_HOOK_URL: http://api:8080/api/v1/live/srs-hook/${LIVE_SRS_SECRET}

@@ -23,6 +23,7 @@ import {
   RadioTower,
   RefreshCw,
   Send,
+  Square,
   Trash2,
   Tv,
   Upload,
@@ -39,6 +40,7 @@ import {
   listMyLiveRooms,
   rotateLiveStreamKey,
   setLiveRoomVisibility,
+  stopLiveRoom,
   followLiveRoom,
   unfollowLiveRoom,
   getLiveRoomFollowStatus,
@@ -294,6 +296,25 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [showHDConsent, setShowHDConsent] = useState(false);
   const [inPiP, setInPiP] = useState(false);
+  // Player-level error surface — replaces a black/buffering video with a
+  // human-readable card. Cleared on a successful MANIFEST_LOADED.
+  const [playerError, setPlayerError] = useState<string | null>(null);
+  // Owner-only "force stop" busy flag.
+  const [stopping, setStopping] = useState(false);
+
+  // refreshPlayback re-fetches the detail to grab a fresh signed URL
+  // (server token TTL is 1 h). Called automatically when hls.js hits a
+  // 401/403 — the URL has gone stale either because exp passed or
+  // because the host rotated the stream key.
+  const refreshPlayback = async () => {
+    try {
+      const fetcher = !!me && me.id === room.ownerId ? getLiveRoomOwner : getLiveRoom;
+      const fresh = await fetcher(room.id);
+      setDetail(fresh);
+    } catch (err: any) {
+      setPlayerError(err?.message ?? '直播间已下线');
+    }
+  };
 
   // Fetch the playback detail. Owners use the privileged endpoint so they
   // can preview their own test-mode room (public endpoint 404s on test rooms).
@@ -331,10 +352,44 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
       hlsRef.current = hls;
       hls.loadSource(playUrl);
       hls.attachMedia(v);
+      // Bounded retry counter so a permanently-offline stream doesn't
+      // hammer the network indefinitely. Resets on the first successful
+      // segment load (MANIFEST_LOADED) so a transient blip mid-stream
+      // doesn't trip the limit. After maxRetries consecutive failures
+      // we fall back to the "主播离线" placeholder.
+      let networkRetries = 0;
+      const maxRetries = 8;
+      hls.on(Hls.Events.MANIFEST_LOADED, () => {
+        networkRetries = 0;
+        setPlayerError(null);
+      });
       hls.on(Hls.Events.ERROR, (_evt, data) => {
-        // Stream not started yet — silently retry; the stream may go live shortly.
-        if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          setTimeout(() => hls.startLoad(), 2000);
+        if (!data.fatal) return;
+        switch (data.type) {
+          case Hls.ErrorTypes.NETWORK_ERROR:
+            // Token may have expired (we send the URL with ?token=&exp=
+            // and nginx returns 401 past TTL) — refetch detail to grab
+            // a fresh URL and rebuild the player.
+            if (data.response?.code === 401 || data.response?.code === 403) {
+              setPlayerError('回话过期，正在刷新…');
+              void refreshPlayback();
+              return;
+            }
+            networkRetries++;
+            if (networkRetries > maxRetries) {
+              setPlayerError('主播离线（无法连接到直播流）');
+              return;
+            }
+            setTimeout(() => hls.startLoad(), 2000);
+            break;
+          case Hls.ErrorTypes.MEDIA_ERROR:
+            // Codec / decoder hiccup. hls.js can self-heal these.
+            try { hls.recoverMediaError(); } catch { /* give up */
+              setPlayerError('播放器解码失败，请刷新页面');
+            }
+            break;
+          default:
+            setPlayerError('播放器异常，请刷新页面');
         }
       });
     }
@@ -386,7 +441,20 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
         }
       } else if (ev.type === 'live.danmaku.rejected') {
         const p = ev.payload as { reason?: string };
-        toast(p.reason === 'banned' ? '你已被禁言，无法发送弹幕' : '弹幕被拒绝', 'error');
+        const msg = p.reason === 'banned'
+          ? '你已被禁言，无法发送弹幕'
+          : p.reason === 'not_subscribed'
+          ? '请等待页面准备就绪后再发送'
+          : '弹幕被拒绝';
+        toast(msg, 'error');
+      } else if (ev.type === 'live.room.deleted') {
+        // Owner dissolved the room from elsewhere (or the SRS reconcile
+        // loop force-ended a zombie). Tear down + bounce out.
+        const p = ev.payload as { roomId: string };
+        if (p.roomId === room.id) {
+          toast('直播间已被关闭', 'info');
+          setTimeout(onBack, 1200);
+        }
       }
     });
     return () => {
@@ -598,10 +666,36 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
           <DanmakuLayer items={danmaku} />
 
           {/* Buffering indicator. Shown on <video> waiting/stalled events. */}
-          {buffering && (
+          {buffering && !playerError && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="bg-black/60 px-3 py-1.5 rounded-full text-xs text-white flex items-center gap-1.5">
                 <Loader2 size={12} className="animate-spin" /> 缓冲中…
+              </div>
+            </div>
+          )}
+
+          {/* Player-level error / offline placeholder. Shown when hls.js
+              hits an unrecoverable fatal (max retries exhausted) or when
+              the API tells us the room is offline. Clears on the next
+              successful manifest load. */}
+          {playerError && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
+              <div className="text-center max-w-md px-6">
+                <div className="text-6xl mb-3">📡</div>
+                <div className="text-base text-ink-1 font-medium">{playerError}</div>
+                <div className="text-xs text-ink-3 mt-2">
+                  {liveRoom.status === 1
+                    ? '主播的连接可能短暂中断，可以稍候刷新页面再试'
+                    : liveRoom.status === 2
+                    ? '本场直播已结束'
+                    : '尚未开播 — 关注主播会在开播时通知你'}
+                </div>
+                <button
+                  onClick={() => { setPlayerError(null); void refreshPlayback(); }}
+                  className="mt-4 inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded bg-bg-3 text-ink-1 hover:bg-bg-4 transition-colors"
+                >
+                  <RefreshCw size={12} /> 重试
+                </button>
               </div>
             </div>
           )}
@@ -707,6 +801,27 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
             >
               <Link2 size={11} /> 分享
             </button>
+            {isOwner && liveRoom.status === 1 && (
+              <button
+                onClick={async () => {
+                  if (!confirm('结束这场直播？\n\n服务端会立刻把状态置为「已结束」，观众端的播放器将断开。\n如果 OBS 还在推流，下一次 SRS 心跳会重新拉起 — 想彻底结束请先停 OBS。')) return;
+                  setStopping(true);
+                  try {
+                    await stopLiveRoom(room.id);
+                    toast('已结束直播', 'success');
+                  } catch (err: any) {
+                    toast(err?.message ?? '结束失败', 'error');
+                  } finally {
+                    setStopping(false);
+                  }
+                }}
+                disabled={stopping}
+                className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-accent-red/20 text-accent-red hover:bg-accent-red/30 transition-colors disabled:opacity-50"
+                title="手动结束（OBS 静默崩溃时用）"
+              >
+                {stopping ? <Loader2 size={11} className="animate-spin" /> : <Square size={11} />} 结束直播
+              </button>
+            )}
           </div>
         </div>
 
