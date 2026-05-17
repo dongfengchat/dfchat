@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -47,6 +48,54 @@ type Room struct {
 	StartedAt   *time.Time `json:"startedAt,omitempty"`
 	EndedAt     *time.Time `json:"endedAt,omitempty"`
 	CreatedAt   time.Time  `json:"createdAt"`
+
+	// Chat moderation settings (Tier C).
+	ChatSubscribersOnly bool `json:"chatSubscribersOnly"`
+	SlowModeSeconds     int  `json:"slowModeSeconds"`
+
+	// Pinned danmaku — one per room. Nil when nothing pinned. Snapshot
+	// of the original text/sender so the pin survives even if the
+	// pinning user later changes their nickname.
+	PinnedDanmakuText   *string    `json:"pinnedDanmakuText,omitempty"`
+	PinnedDanmakuSender *int64     `json:"pinnedDanmakuSender,omitempty,string"`
+	PinnedDanmakuColor  *string    `json:"pinnedDanmakuColor,omitempty"`
+	PinnedDanmakuAt     *time.Time `json:"pinnedDanmakuAt,omitempty"`
+}
+
+// roomSelectAll is the canonical column list for SELECTs that hydrate
+// a full Room with stream_key exposed (owner-facing endpoints). The
+// roomSelectPublic variant blanks the key for public listings so it
+// doesn't leak via discover/search responses.
+const roomSelectAll = `id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
+		stream_key, status, viewer_count, total_views, is_test,
+		started_at, ended_at, created_at,
+		chat_subscribers_only, slow_mode_seconds,
+		pinned_danmaku_text, pinned_danmaku_sender,
+		pinned_danmaku_color, pinned_danmaku_at`
+
+const roomSelectPublic = `id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
+		'' AS stream_key, status, viewer_count, total_views, is_test,
+		started_at, ended_at, created_at,
+		chat_subscribers_only, slow_mode_seconds,
+		pinned_danmaku_text, pinned_danmaku_sender,
+		pinned_danmaku_color, pinned_danmaku_at`
+
+// scanRoom hydrates a Room from a row produced by a SELECT using
+// roomSelectAll. The pgx Row + Rows interfaces both satisfy this
+// shape so it works from QueryRow and Query-then-Next callers.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRoom(row rowScanner, rm *Room) error {
+	return row.Scan(
+		&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
+		&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
+		&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt,
+		&rm.ChatSubscribersOnly, &rm.SlowModeSeconds,
+		&rm.PinnedDanmakuText, &rm.PinnedDanmakuSender,
+		&rm.PinnedDanmakuColor, &rm.PinnedDanmakuAt,
+	)
 }
 
 type Repo struct {
@@ -70,31 +119,20 @@ func (r *Repo) Create(ctx context.Context, ownerID int64, title, category string
 	if err != nil {
 		return nil, err
 	}
-	const q = `
-		INSERT INTO live_rooms (owner_id, title, category, stream_key)
+	q := `INSERT INTO live_rooms (owner_id, title, category, stream_key)
 		VALUES ($1, $2, NULLIF($3, ''), $4)
-		RETURNING id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
-		          stream_key, status, viewer_count, total_views, is_test,
-		          started_at, ended_at, created_at`
+		RETURNING ` + roomSelectAll
 	rm := &Room{}
-	err = r.pool.QueryRow(ctx, q, ownerID, title, category, key).Scan(
-		&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
-		&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
-		&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt,
-	)
-	return rm, err
+	if err := scanRoom(r.pool.QueryRow(ctx, q, ownerID, title, category, key), rm); err != nil {
+		return nil, err
+	}
+	return rm, nil
 }
 
 func (r *Repo) FindByID(ctx context.Context, id int64) (*Room, error) {
 	rm := &Room{}
-	const q = `SELECT id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
-		stream_key, status, viewer_count, total_views, is_test, started_at, ended_at, created_at
-		FROM live_rooms WHERE id = $1`
-	err := r.pool.QueryRow(ctx, q, id).Scan(
-		&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
-		&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
-		&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt,
-	)
+	err := scanRoom(r.pool.QueryRow(ctx,
+		`SELECT `+roomSelectAll+` FROM live_rooms WHERE id = $1`, id), rm)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -105,32 +143,50 @@ func (r *Repo) FindByID(ctx context.Context, id int64) (*Room, error) {
 // `on_publish` against. Always include in dedicated `(stream_key)` index.
 func (r *Repo) FindByStreamKey(ctx context.Context, key string) (*Room, error) {
 	rm := &Room{}
-	const q = `SELECT id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
-		stream_key, status, viewer_count, total_views, is_test, started_at, ended_at, created_at
-		FROM live_rooms WHERE stream_key = $1`
-	err := r.pool.QueryRow(ctx, q, key).Scan(
-		&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
-		&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
-		&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt,
-	)
+	err := scanRoom(r.pool.QueryRow(ctx,
+		`SELECT `+roomSelectAll+` FROM live_rooms WHERE stream_key = $1`, key), rm)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrInvalidStreamKey
 	}
 	return rm, err
 }
 
-func (r *Repo) ListLive(ctx context.Context, limit int) ([]*Room, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 30
+// ListLiveFilter narrows the public discover list. Empty Q / Category =
+// no filter. Q is matched ILIKE against title (substring, case-insensitive).
+type ListLiveFilter struct {
+	Q        string
+	Category string
+	Limit    int
+}
+
+func (r *Repo) ListLive(ctx context.Context, filter ListLiveFilter) ([]*Room, error) {
+	if filter.Limit <= 0 || filter.Limit > 100 {
+		filter.Limit = 30
 	}
-	rows, err := r.pool.Query(ctx,
-		`SELECT id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
-		        '' AS stream_key, status, viewer_count, total_views, is_test,
-		        started_at, ended_at, created_at
-		 FROM live_rooms
-		 WHERE status = $1 AND NOT is_test
-		 ORDER BY viewer_count DESC, started_at DESC
-		 LIMIT $2`, StatusLive, limit)
+	// Build the WHERE clause incrementally. Always exclude test-mode
+	// rooms; only show currently-live status. Filter args use
+	// $-placeholder indices that grow as we add clauses.
+	where := []string{"status = $1", "NOT is_test"}
+	args := []any{StatusLive}
+	idx := 2
+	if cat := strings.TrimSpace(filter.Category); cat != "" {
+		where = append(where, "category = $"+itoa(idx))
+		args = append(args, cat)
+		idx++
+	}
+	if q := strings.TrimSpace(filter.Q); q != "" {
+		// Escape ILIKE wildcards so a user typing % gets a literal %.
+		safe := strings.ReplaceAll(q, `\`, `\\`)
+		safe = strings.ReplaceAll(safe, `%`, `\%`)
+		safe = strings.ReplaceAll(safe, `_`, `\_`)
+		where = append(where, "title ILIKE $"+itoa(idx))
+		args = append(args, "%"+safe+"%")
+		idx++
+	}
+	args = append(args, filter.Limit)
+	sql := `SELECT ` + roomSelectPublic + ` FROM live_rooms WHERE ` + join(where, " AND ") +
+		` ORDER BY viewer_count DESC, started_at DESC LIMIT $` + itoa(idx)
+	rows, err := r.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -138,9 +194,7 @@ func (r *Repo) ListLive(ctx context.Context, limit int) ([]*Room, error) {
 	out := make([]*Room, 0)
 	for rows.Next() {
 		rm := &Room{}
-		if err := rows.Scan(&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
-			&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
-			&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt); err != nil {
+		if err := scanRoom(rows, rm); err != nil {
 			return nil, err
 		}
 		out = append(out, rm)
@@ -150,12 +204,7 @@ func (r *Repo) ListLive(ctx context.Context, limit int) ([]*Room, error) {
 
 func (r *Repo) ListMine(ctx context.Context, ownerID int64) ([]*Room, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
-		        stream_key, status, viewer_count, total_views, is_test,
-		        started_at, ended_at, created_at
-		 FROM live_rooms
-		 WHERE owner_id = $1
-		 ORDER BY created_at DESC`, ownerID)
+		`SELECT `+roomSelectAll+` FROM live_rooms WHERE owner_id = $1 ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -163,9 +212,7 @@ func (r *Repo) ListMine(ctx context.Context, ownerID int64) ([]*Room, error) {
 	out := make([]*Room, 0)
 	for rows.Next() {
 		rm := &Room{}
-		if err := rows.Scan(&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
-			&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
-			&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt); err != nil {
+		if err := scanRoom(rows, rm); err != nil {
 			return nil, err
 		}
 		out = append(out, rm)
@@ -198,14 +245,9 @@ func (r *Repo) UpdateMeta(ctx context.Context, id, ownerID int64, title, categor
 	args = append(args, id, ownerID)
 	q := "UPDATE live_rooms SET " + join(sets, ", ") +
 		" WHERE id = $" + itoa(idx) + " AND owner_id = $" + itoa(idx+1) +
-		` RETURNING id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
-		           stream_key, status, viewer_count, total_views, is_test, started_at, ended_at, created_at`
+		` RETURNING ` + roomSelectAll
 	rm := &Room{}
-	err := r.pool.QueryRow(ctx, q, args...).Scan(
-		&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
-		&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
-		&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt,
-	)
+	err := scanRoom(r.pool.QueryRow(ctx, q, args...), rm)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotOwner
 	}
@@ -215,21 +257,90 @@ func (r *Repo) UpdateMeta(ctx context.Context, id, ownerID int64, title, categor
 // SetVisibility flips the is_test flag (host preview ↔ public discover).
 // Only the owner can call this; mismatched owner returns ErrNotOwner.
 func (r *Repo) SetVisibility(ctx context.Context, id, ownerID int64, isTest bool) (*Room, error) {
-	const q = `UPDATE live_rooms SET is_test = $3
-	           WHERE id = $1 AND owner_id = $2
-	           RETURNING id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
-	                     stream_key, status, viewer_count, total_views, is_test,
-	                     started_at, ended_at, created_at`
+	q := `UPDATE live_rooms SET is_test = $3
+	      WHERE id = $1 AND owner_id = $2
+	      RETURNING ` + roomSelectAll
 	rm := &Room{}
-	err := r.pool.QueryRow(ctx, q, id, ownerID, isTest).Scan(
-		&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
-		&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
-		&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt,
-	)
+	err := scanRoom(r.pool.QueryRow(ctx, q, id, ownerID, isTest), rm)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotOwner
 	}
 	return rm, err
+}
+
+// UpdateChatSettings is the owner-only "chat moderation" endpoint —
+// flips slow_mode_seconds and chat_subscribers_only in one shot. Both
+// are server-enforced in the realtime danmaku send path. A future
+// migration can add e.g. emote-only or word-blocklist alongside.
+func (r *Repo) UpdateChatSettings(ctx context.Context, id, ownerID int64, slowSeconds *int, subscribersOnly *bool) (*Room, error) {
+	sets := []string{}
+	args := []any{}
+	idx := 1
+	if slowSeconds != nil {
+		s := *slowSeconds
+		if s < 0 {
+			s = 0
+		}
+		if s > 300 {
+			s = 300
+		}
+		sets = append(sets, "slow_mode_seconds = $"+itoa(idx))
+		args = append(args, s)
+		idx++
+	}
+	if subscribersOnly != nil {
+		sets = append(sets, "chat_subscribers_only = $"+itoa(idx))
+		args = append(args, *subscribersOnly)
+		idx++
+	}
+	if len(sets) == 0 {
+		return r.FindByID(ctx, id)
+	}
+	args = append(args, id, ownerID)
+	q := "UPDATE live_rooms SET " + join(sets, ", ") +
+		" WHERE id = $" + itoa(idx) + " AND owner_id = $" + itoa(idx+1) +
+		` RETURNING ` + roomSelectAll
+	rm := &Room{}
+	err := scanRoom(r.pool.QueryRow(ctx, q, args...), rm)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotOwner
+	}
+	return rm, err
+}
+
+// PinDanmaku snapshots the given danmaku into the live_rooms row so it
+// stays visible at the top of the chat for late joiners. Set pin to a
+// non-empty text to pin, or empty / nil to clear.
+func (r *Repo) PinDanmaku(ctx context.Context, id, ownerID int64, text, color string, senderID int64) (*Room, error) {
+	q := `UPDATE live_rooms
+	      SET pinned_danmaku_text   = NULLIF($3, ''),
+	          pinned_danmaku_sender = CASE WHEN $3 = '' THEN NULL ELSE $4 END,
+	          pinned_danmaku_color  = CASE WHEN $3 = '' THEN NULL ELSE NULLIF($5, '') END,
+	          pinned_danmaku_at     = CASE WHEN $3 = '' THEN NULL ELSE now() END
+	      WHERE id = $1 AND owner_id = $2
+	      RETURNING ` + roomSelectAll
+	rm := &Room{}
+	err := scanRoom(r.pool.QueryRow(ctx, q, id, ownerID, text, senderID, color), rm)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotOwner
+	}
+	return rm, err
+}
+
+// ChatSettings returns the minimal "what does the danmaku send handler
+// need to enforce" tuple. Tuple shape (not struct) because this is
+// the LiveBackend interface used by realtime — keeps that contract
+// small. Returns zero values for unknown rooms (caller treats that
+// as "no moderation").
+func (r *Repo) ChatSettings(ctx context.Context, roomID int64) (slowSeconds int, subscribersOnly bool, ownerID int64, err error) {
+	err = r.pool.QueryRow(ctx, `
+		SELECT slow_mode_seconds, chat_subscribers_only, owner_id
+		FROM live_rooms WHERE id = $1`, roomID,
+	).Scan(&slowSeconds, &subscribersOnly, &ownerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, 0, ErrNotFound
+	}
+	return
 }
 
 // SetLive flips a room into the live state (SRS on_publish hook). Also
@@ -601,6 +712,8 @@ func (r *Repo) DeleteRecording(ctx context.Context, recID, ownerID int64) (fileU
 // =============== Scheduling / viewer count ===============
 
 // ListScheduled returns upcoming public rooms (scheduled_at > NOW, not live).
+// Aliases scheduled_at → started_at so the same JSON shape works for both
+// the "upcoming" widget and the "currently live" listing on the client.
 func (r *Repo) ListScheduled(ctx context.Context, limit int) ([]*Room, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 30
@@ -608,7 +721,10 @@ func (r *Repo) ListScheduled(ctx context.Context, limit int) ([]*Room, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
 		        '' as stream_key, status, viewer_count, total_views, is_test,
-		        scheduled_at, ended_at, created_at
+		        scheduled_at, ended_at, created_at,
+		        chat_subscribers_only, slow_mode_seconds,
+		        pinned_danmaku_text, pinned_danmaku_sender,
+		        pinned_danmaku_color, pinned_danmaku_at
 		 FROM live_rooms
 		 WHERE NOT is_test AND scheduled_at IS NOT NULL
 		   AND scheduled_at > NOW() AND status != 1
@@ -620,9 +736,7 @@ func (r *Repo) ListScheduled(ctx context.Context, limit int) ([]*Room, error) {
 	out := make([]*Room, 0)
 	for rows.Next() {
 		rm := &Room{}
-		if err := rows.Scan(&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
-			&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
-			&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt); err != nil {
+		if err := scanRoom(rows, rm); err != nil {
 			return nil, err
 		}
 		out = append(out, rm)
@@ -652,7 +766,10 @@ func (r *Repo) DueReminders(ctx context.Context, window time.Duration) ([]*Room,
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
 		        '' as stream_key, status, viewer_count, total_views, is_test,
-		        scheduled_at, ended_at, created_at
+		        scheduled_at, ended_at, created_at,
+		        chat_subscribers_only, slow_mode_seconds,
+		        pinned_danmaku_text, pinned_danmaku_sender,
+		        pinned_danmaku_color, pinned_danmaku_at
 		 FROM live_rooms
 		 WHERE NOT scheduled_notified AND NOT is_test
 		   AND scheduled_at IS NOT NULL
@@ -666,9 +783,7 @@ func (r *Repo) DueReminders(ctx context.Context, window time.Duration) ([]*Room,
 	out := make([]*Room, 0)
 	for rows.Next() {
 		rm := &Room{}
-		if err := rows.Scan(&rm.ID, &rm.OwnerID, &rm.Title, &rm.CoverURL, &rm.Category,
-			&rm.StreamKey, &rm.Status, &rm.ViewerCount, &rm.TotalViews, &rm.IsTest,
-			&rm.StartedAt, &rm.EndedAt, &rm.CreatedAt); err != nil {
+		if err := scanRoom(rows, rm); err != nil {
 			return nil, err
 		}
 		out = append(out, rm)

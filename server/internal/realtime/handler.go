@@ -28,6 +28,12 @@ type LiveBackend interface {
 	SetViewerCount(ctx context.Context, roomID int64, count int, bumpTotal bool) error
 	IsBanned(ctx context.Context, roomID, userID int64) (banned, isKick bool, err error)
 	BumpDanmaku(ctx context.Context, roomID int64) error
+	// ChatSettings + IsFollowing back the Tier-C moderation enforced in
+	// the danmaku send path. ChatSettings is hit per send so it stays
+	// cheap (single-row lookup); IsFollowing is only hit when the room
+	// has chat_subscribers_only=true so the common case is a no-op.
+	ChatSettings(ctx context.Context, roomID int64) (slowSeconds int, subscribersOnly bool, ownerID int64, err error)
+	IsFollowing(ctx context.Context, roomID, userID int64) (bool, error)
 }
 
 // RelayBackend gates peer-to-peer WS-relayed messages (WebRTC signaling
@@ -74,6 +80,15 @@ type Handler struct {
 	liveMu   sync.Mutex
 	liveSubs map[string]map[int64]struct{}
 
+	// slowMu guards slowLast — last-danmaku-sent timestamp per
+	// (roomID, userID) used to enforce per-room slow_mode_seconds.
+	// In-memory by design: a server restart resets every viewer's
+	// cooldown to zero, which is the desired behavior (cooldowns
+	// shouldn't outlive the process; people who left + came back
+	// shouldn't be silenced because of stale state).
+	slowMu   sync.Mutex
+	slowLast map[string]time.Time // key = "<roomID>|<userID>"
+
 	// Per-user connection accounting for the cap.
 	connMu    sync.Mutex
 	connCount map[int64]int
@@ -88,6 +103,7 @@ func NewHandler(issuer *auth.Issuer, bus *wsbus.Bus, log *slog.Logger, live Live
 		relay:          relay,
 		allowedOrigins: allowedOrigins,
 		liveSubs:       make(map[string]map[int64]struct{}),
+		slowLast:       make(map[string]time.Time),
 		connCount:      make(map[int64]int),
 	}
 	h.up = websocket.Upgrader{
@@ -469,7 +485,12 @@ func (h *Handler) handleLiveDanmaku(userID int64, env clientEnvelope) {
 		return
 	}
 
-	// Ban check before doing any persistent work.
+	// Tier-C chat moderation. Order of checks (most → least likely to
+	// reject so we bail early): ban → subscriber-only → slow-mode.
+	// Owner of the room bypasses subscriber-only + slow-mode (so the
+	// host can talk to their own chat without slow-mode tripping them
+	// up). Ban still applies to the owner because the owner shouldn't
+	// be banning themselves, but if they did, we honor it.
 	if h.live != nil {
 		if roomID, err := strconv.ParseInt(p.RoomID, 10, 64); err == nil {
 			banned, _, _ := h.live.IsBanned(context.Background(), roomID, userID)
@@ -480,6 +501,51 @@ func (h *Handler) handleLiveDanmaku(userID int64, env clientEnvelope) {
 				})
 				return
 			}
+
+			slowSeconds, subscribersOnly, ownerID, csErr := h.live.ChatSettings(context.Background(), roomID)
+			isOwner := csErr == nil && ownerID == userID
+
+			if csErr == nil && subscribersOnly && !isOwner {
+				following, _ := h.live.IsFollowing(context.Background(), roomID, userID)
+				if !following {
+					h.bus.Publish(userID, wsbus.Event{
+						Type: "live.danmaku.rejected",
+						Payload: map[string]any{
+							"roomId": p.RoomID,
+							"reason": "subscribers_only",
+						},
+					})
+					return
+				}
+			}
+
+			if csErr == nil && slowSeconds > 0 && !isOwner {
+				cooldown := time.Duration(slowSeconds) * time.Second
+				key := p.RoomID + "|" + strconv.FormatInt(userID, 10)
+				now := time.Now()
+				h.slowMu.Lock()
+				last, hit := h.slowLast[key]
+				remaining := time.Duration(0)
+				if hit {
+					remaining = cooldown - now.Sub(last)
+				}
+				if remaining > 0 {
+					h.slowMu.Unlock()
+					h.bus.Publish(userID, wsbus.Event{
+						Type: "live.danmaku.rejected",
+						Payload: map[string]any{
+							"roomId":          p.RoomID,
+							"reason":          "slow_mode",
+							"cooldownSeconds": slowSeconds,
+							"retryAfterMs":    remaining.Milliseconds(),
+						},
+					})
+					return
+				}
+				h.slowLast[key] = now
+				h.slowMu.Unlock()
+			}
+
 			// Persist + bump the per-room counter so the live-ended
 			// recap can show "总弹幕 N" without scanning live_danmaku.
 			// Both best-effort — failure here mustn't block broadcast.

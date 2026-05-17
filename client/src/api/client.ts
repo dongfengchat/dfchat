@@ -282,9 +282,16 @@ export async function deleteMe(password: string): Promise<void> {
 
 // ====== Live streaming ============================================
 
-export async function listLiveRooms(): Promise<{ rooms: LiveRoom[]; hlsBase: string }> {
+// listLiveRooms now supports optional Discover filters (q text search +
+// category). Empty / undefined params hit the unfiltered endpoint.
+export async function listLiveRooms(params?: { q?: string; category?: string; limit?: number }): Promise<{ rooms: LiveRoom[]; hlsBase: string }> {
   try {
-    const res = await api.get<{ rooms: LiveRoom[]; hlsBase: string }>('/api/v1/live/rooms');
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.category) qs.set('category', params.category);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await api.get<{ rooms: LiveRoom[]; hlsBase: string }>(`/api/v1/live/rooms${suffix}`);
     return { rooms: res.data.rooms ?? [], hlsBase: res.data.hlsBase };
   } catch (e) { throw unwrapError(e); }
 }
@@ -342,6 +349,35 @@ export async function deleteLiveRoom(id: string): Promise<void> {
 // the server so any leaked URL can't be repushed.
 export async function stopLiveRoom(id: string): Promise<void> {
   try { await api.post(`/api/v1/live/rooms/${id}/stop`); } catch (e) { throw unwrapError(e); }
+}
+
+// updateLiveChatSettings flips slow-mode + subscriber-only on a live
+// room. Owner-only. Both fields optional — undefined leaves as-is.
+export async function updateLiveChatSettings(
+  id: string,
+  patch: { slowModeSeconds?: number; chatSubscribersOnly?: boolean },
+): Promise<LiveRoom> {
+  try {
+    const res = await api.patch<{ room: LiveRoom }>(`/api/v1/live/rooms/${id}/chat-settings`, patch);
+    return res.data.room;
+  } catch (e) { throw unwrapError(e); }
+}
+
+// pinLiveDanmaku pins a chosen danmaku as the room's top-of-chat
+// highlight. Replaces any previous pin. senderId defaults to the
+// caller (owner pinning their own) if omitted server-side.
+export async function pinLiveDanmaku(
+  id: string,
+  body: { text: string; color?: string; senderId?: string },
+): Promise<LiveRoom> {
+  try {
+    const res = await api.post<{ room: LiveRoom }>(`/api/v1/live/rooms/${id}/pin-danmaku`, body);
+    return res.data.room;
+  } catch (e) { throw unwrapError(e); }
+}
+
+export async function unpinLiveDanmaku(id: string): Promise<void> {
+  try { await api.delete(`/api/v1/live/rooms/${id}/pin-danmaku`); } catch (e) { throw unwrapError(e); }
 }
 
 // Flip a room between test-broadcast (host-only) and public (in discover).

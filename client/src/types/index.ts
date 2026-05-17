@@ -36,6 +36,14 @@ export interface LiveRoom {
   startedAt?: string;
   endedAt?: string;
   createdAt: string;
+
+  // Tier-C chat moderation. Always present (defaults: 0 / false / null).
+  chatSubscribersOnly?: boolean;
+  slowModeSeconds?: number;
+  pinnedDanmakuText?: string;
+  pinnedDanmakuSender?: string;
+  pinnedDanmakuColor?: string;
+  pinnedDanmakuAt?: string; // ISO timestamp
 }
 
 export interface LiveDanmakuItem {

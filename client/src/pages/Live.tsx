@@ -7,6 +7,7 @@ import {
   Calendar,
   Camera,
   Copy,
+  Crown,
   Eye,
   EyeOff,
   Gauge,
@@ -18,6 +19,10 @@ import {
   Palette,
   Pencil,
   PictureInPicture2,
+  Pin as PinIcon,
+  PinOff,
+  Search,
+  Settings,
   Smile,
   Plus,
   RadioTower,
@@ -29,27 +34,31 @@ import {
   Upload,
   Users,
   Video,
+  X,
 } from 'lucide-react';
 import Hls from 'hls.js';
 import {
+  banLiveUser,
   createLiveRoom,
   deleteLiveRoom,
+  followLiveRoom,
   getLiveRoom,
+  getLiveRoomFollowStatus,
   getLiveRoomOwner,
+  listLiveDanmaku,
   listLiveRooms,
   listMyLiveRooms,
+  listScheduledLiveRooms,
+  pinLiveDanmaku,
   rotateLiveStreamKey,
+  setLiveRoomSchedule,
   setLiveRoomVisibility,
   stopLiveRoom,
-  followLiveRoom,
   unfollowLiveRoom,
-  getLiveRoomFollowStatus,
-  listLiveDanmaku,
-  setLiveRoomSchedule,
-  listScheduledLiveRooms,
+  unpinLiveDanmaku,
+  updateLiveChatSettings,
   updateLiveRoom,
   uploadBlob,
-  banLiveUser,
 } from '@/api/client';
 import { useUserStore } from '@/store/userStore';
 import { wsClient } from '@/ws/client';
@@ -132,7 +141,23 @@ function Discover({ onOpen }: { onOpen: (r: LiveRoom) => void }) {
   const [scheduled, setScheduled] = useState<LiveRoom[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState<string>('全部');
+  // Two independent search fields: q is the live-bound input (every keystroke),
+  // qDebounced is what we actually send to the API. 250 ms debounce keeps the
+  // server unstressed when someone types fast.
+  const [q, setQ] = useState('');
+  const [qDebounced, setQDebounced] = useState('');
+  // Category list is derived from the FIRST unfiltered fetch only. We freeze it
+  // so the pills don't disappear when a filter narrows the result set to a
+  // single category (which would otherwise hide all the other options).
+  const [categories, setCategories] = useState<string[]>(['全部']);
 
+  // Debounce q → qDebounced.
+  useEffect(() => {
+    const t = setTimeout(() => setQDebounced(q.trim()), 250);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  // Initial mount — pull unfiltered list (for category seed) + scheduled list.
   useEffect(() => {
     let cancelled = false;
     Promise.all([listLiveRooms(), listScheduledLiveRooms().catch(() => [])])
@@ -140,22 +165,28 @@ function Discover({ onOpen }: { onOpen: (r: LiveRoom) => void }) {
         if (cancelled) return;
         setRooms(live.rooms);
         setScheduled(sched);
+        const set = new Set<string>();
+        live.rooms.forEach((r) => { if (r.category) set.add(r.category); });
+        setCategories(['全部', ...Array.from(set).sort()]);
       })
       .catch((e) => !cancelled && setError(e.message ?? '加载失败'));
     return () => { cancelled = true; };
   }, []);
 
-  // Distinct category list (plus a "全部" sentinel for "no filter").
-  const categories = useMemo(() => {
-    const set = new Set<string>();
-    rooms?.forEach((r) => { if (r.category) set.add(r.category); });
-    return ['全部', ...Array.from(set).sort()];
-  }, [rooms]);
-  const filteredRooms = useMemo(() => {
-    if (!rooms) return null;
-    if (activeCategory === '全部') return rooms;
-    return rooms.filter((r) => r.category === activeCategory);
-  }, [rooms, activeCategory]);
+  // Refetch whenever the filters change (skips first mount via a guard ref —
+  // initial fetch already happened above with no filters).
+  const didMount = useRef(false);
+  useEffect(() => {
+    if (!didMount.current) { didMount.current = true; return; }
+    let cancelled = false;
+    listLiveRooms({
+      q: qDebounced || undefined,
+      category: activeCategory === '全部' ? undefined : activeCategory,
+    })
+      .then((live) => { if (!cancelled) setRooms(live.rooms); })
+      .catch((e) => !cancelled && setError(e.message ?? '加载失败'));
+    return () => { cancelled = true; };
+  }, [qDebounced, activeCategory]);
 
   if (error) return <div className="p-8 text-accent-red">{error}</div>;
   if (rooms === null) return <div className="p-8 text-ink-3 flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> 加载中…</div>;
@@ -200,6 +231,27 @@ function Discover({ onOpen }: { onOpen: (r: LiveRoom) => void }) {
       <h2 className="text-lg font-semibold mb-1">正在直播</h2>
       <p className="text-sm text-ink-3 mb-4">点击进入直播间观看 + 发弹幕</p>
 
+      {/* Search box — title substring, server-side ILIKE. */}
+      <div className="relative mb-3 max-w-md">
+        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-4 pointer-events-none" />
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="搜索直播间标题…"
+          className="input pl-9 pr-9 w-full"
+          maxLength={64}
+        />
+        {q && (
+          <button
+            onClick={() => setQ('')}
+            className="absolute right-2 top-1/2 -translate-y-1/2 btn-icon w-7 h-7 text-ink-4"
+            title="清除"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </div>
+
       {/* Category filter pills — only shows when rooms have at least one category. */}
       {categories.length > 1 && (
         <div className="flex flex-wrap gap-1.5 mb-4">
@@ -219,16 +271,22 @@ function Discover({ onOpen }: { onOpen: (r: LiveRoom) => void }) {
         </div>
       )}
 
-      {filteredRooms && filteredRooms.length === 0 && (
+      {rooms && rooms.length === 0 && (
         <div className="card p-12 text-center text-ink-3 anim-fade">
           <Tv size={36} className="mx-auto mb-3 text-ink-4" />
-          <div>{activeCategory === '全部' ? '当前没人在直播' : `没有「${activeCategory}」分类的直播`}</div>
+          <div>
+            {qDebounced
+              ? `没找到包含「${qDebounced}」的直播`
+              : activeCategory === '全部'
+              ? '当前没人在直播'
+              : `没有「${activeCategory}」分类的直播`}
+          </div>
           <div className="text-xs text-ink-4 mt-1">切换到「我的直播」自己开一个</div>
         </div>
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {(filteredRooms ?? []).map((r) => (
+        {(rooms ?? []).map((r) => (
           <button
             key={r.id}
             onClick={() => onOpen(r)}
@@ -301,6 +359,11 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
   const [playerError, setPlayerError] = useState<string | null>(null);
   // Owner-only "force stop" busy flag.
   const [stopping, setStopping] = useState(false);
+  // Owner-only chat-moderation settings dialog (slow mode + subscribers-only).
+  const [showChatSettings, setShowChatSettings] = useState(false);
+  // Pin/unpin busy flag — keeps the context-menu items from re-firing
+  // while the request is in flight.
+  const [pinning, setPinning] = useState(false);
 
   // refreshPlayback re-fetches the detail to grab a fresh signed URL
   // (server token TTL is 1 h). Called automatically when hls.js hits a
@@ -440,11 +503,15 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
           setTimeout(onBack, 1500);
         }
       } else if (ev.type === 'live.danmaku.rejected') {
-        const p = ev.payload as { reason?: string };
+        const p = ev.payload as { reason?: string; retryAfterMs?: number };
         const msg = p.reason === 'banned'
           ? '你已被禁言，无法发送弹幕'
           : p.reason === 'not_subscribed'
           ? '请等待页面准备就绪后再发送'
+          : p.reason === 'subscribers_only'
+          ? '主播开启了仅关注者发言，关注后即可弹幕'
+          : p.reason === 'slow_mode'
+          ? `慢速模式中，请 ${Math.ceil((p.retryAfterMs ?? 1000) / 1000)} 秒后再发`
           : '弹幕被拒绝';
         toast(msg, 'error');
       } else if (ev.type === 'live.room.deleted') {
@@ -801,6 +868,18 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
             >
               <Link2 size={11} /> 分享
             </button>
+            {isOwner && (
+              <button
+                onClick={() => setShowChatSettings(true)}
+                className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-bg-3 text-ink-2 hover:bg-bg-4 transition-colors"
+                title="弹幕设置（慢速 / 仅关注者）"
+              >
+                <Settings size={11} /> 弹幕设置
+                {(liveRoom.slowModeSeconds || liveRoom.chatSubscribersOnly) && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-accent-amber" />
+                )}
+              </button>
+            )}
             {isOwner && liveRoom.status === 1 && (
               <button
                 onClick={async () => {
@@ -831,40 +910,136 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
 
       {/* Danmaku feed + input */}
       <aside className="card flex flex-col min-h-0">
-        <div className="px-3 py-2 border-b border-bg-5/40 text-xs uppercase tracking-wider text-ink-3">弹幕</div>
+        <div className="px-3 py-2 border-b border-bg-5/40 text-xs uppercase tracking-wider text-ink-3 flex items-center justify-between">
+          <span>弹幕</span>
+          {/* Mode indicator pills — viewers see why their send may be rejected. */}
+          <span className="flex items-center gap-1 normal-case tracking-normal">
+            {!!liveRoom.slowModeSeconds && liveRoom.slowModeSeconds > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-amber/20 text-accent-amber" title="主播开启了慢速模式">
+                慢速 {liveRoom.slowModeSeconds}s
+              </span>
+            )}
+            {liveRoom.chatSubscribersOnly && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-300" title="仅关注者可发弹幕">
+                仅关注者
+              </span>
+            )}
+          </span>
+        </div>
+
+        {/* Pinned danmaku strip — host's highlight. Shown to everyone. */}
+        {liveRoom.pinnedDanmakuText && (
+          <div className="px-3 py-2 border-b border-bg-5/40 bg-brand-500/10 flex items-start gap-2">
+            <PinIcon size={12} className="text-brand-300 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <div className="text-[10px] uppercase tracking-wider text-brand-300 mb-0.5">主播置顶</div>
+              <div
+                className="text-sm break-words"
+                style={liveRoom.pinnedDanmakuColor ? { color: liveRoom.pinnedDanmakuColor } : undefined}
+              >
+                {liveRoom.pinnedDanmakuText}
+              </div>
+            </div>
+            {isOwner && (
+              <button
+                onClick={async () => {
+                  if (pinning) return;
+                  setPinning(true);
+                  try {
+                    await unpinLiveDanmaku(room.id);
+                    setLiveRoom((r) => ({ ...r, pinnedDanmakuText: undefined, pinnedDanmakuColor: undefined, pinnedDanmakuSender: undefined, pinnedDanmakuAt: undefined }));
+                  } catch (e: any) {
+                    toast(e.message ?? '取消置顶失败', 'error');
+                  } finally {
+                    setPinning(false);
+                  }
+                }}
+                className="btn-icon w-6 h-6 text-ink-3 shrink-0"
+                title="取消置顶"
+              >
+                <PinOff size={11} />
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto p-3 space-y-1">
           {danmaku.length === 0 && (
             <div className="text-xs text-ink-4 text-center py-6">还没有弹幕，发第一条吧</div>
           )}
-          {danmaku.slice(-100).map((d, i) => (
-            <div key={i} className="group text-sm text-ink-2 flex items-start gap-1.5 hover:bg-bg-3/40 rounded px-1 py-0.5">
-              <span className="text-ink-4 text-[11px] shrink-0 mt-0.5">{new Date(d.ts).toLocaleTimeString().slice(0, 5)}</span>
-              <span className="flex-1 min-w-0 break-words" style={d.color ? { color: d.color } : undefined}>
-                {d.text}
-              </span>
-              {isOwner && me && d.senderId !== me.id && (
-                <button
-                  onClick={async () => {
-                    const action = window.prompt(
-                      `对用户 ${d.senderId} 的操作:\n  1 = 禁言（不能再发弹幕，可继续观看）\n  2 = 踢出（断开 WS 连接）\n  其他 = 取消`,
-                      '1',
-                    );
-                    if (action !== '1' && action !== '2') return;
-                    try {
-                      await banLiveUser(room.id, d.senderId, action === '2', '主播屏蔽');
-                      toast(action === '2' ? '已踢出该用户' : '已禁言该用户', 'success');
-                    } catch (e: any) {
-                      toast(e.message ?? '操作失败', 'error');
-                    }
-                  }}
-                  className="opacity-0 group-hover:opacity-100 transition-opacity btn-icon w-6 h-6 text-accent-red shrink-0"
-                  title="禁言 / 踢出"
+          {danmaku.slice(-100).map((d, i) => {
+            const isHost = d.senderId === liveRoom.ownerId;
+            return (
+              <div
+                key={i}
+                className={`group text-sm flex items-start gap-1.5 hover:bg-bg-3/40 rounded px-1 py-0.5 ${
+                  isHost ? 'bg-amber-500/5' : ''
+                }`}
+              >
+                <span className="text-ink-4 text-[11px] shrink-0 mt-0.5">{new Date(d.ts).toLocaleTimeString().slice(0, 5)}</span>
+                {isHost && (
+                  <span
+                    title="主播"
+                    className="inline-flex items-center gap-0.5 text-[10px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-400 shrink-0 mt-0.5"
+                  >
+                    <Crown size={9} /> 主播
+                  </span>
+                )}
+                <span
+                  className={`flex-1 min-w-0 break-words ${isHost ? 'text-amber-200 font-medium' : 'text-ink-2'}`}
+                  style={d.color && !isHost ? { color: d.color } : undefined}
                 >
-                  <BellOff size={11} />
-                </button>
-              )}
-            </div>
-          ))}
+                  {d.text}
+                </span>
+                {isOwner && (
+                  <button
+                    onClick={async () => {
+                      if (pinning) return;
+                      setPinning(true);
+                      try {
+                        const updated = await pinLiveDanmaku(room.id, {
+                          text: d.text,
+                          color: d.color,
+                          senderId: d.senderId,
+                        });
+                        setLiveRoom(updated);
+                        toast('已置顶该弹幕', 'success');
+                      } catch (e: any) {
+                        toast(e.message ?? '置顶失败', 'error');
+                      } finally {
+                        setPinning(false);
+                      }
+                    }}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity btn-icon w-6 h-6 text-brand-300 shrink-0"
+                    title="置顶这条弹幕"
+                  >
+                    <PinIcon size={11} />
+                  </button>
+                )}
+                {isOwner && me && d.senderId !== me.id && (
+                  <button
+                    onClick={async () => {
+                      const action = window.prompt(
+                        `对用户 ${d.senderId} 的操作:\n  1 = 禁言（不能再发弹幕，可继续观看）\n  2 = 踢出（断开 WS 连接）\n  其他 = 取消`,
+                        '1',
+                      );
+                      if (action !== '1' && action !== '2') return;
+                      try {
+                        await banLiveUser(room.id, d.senderId, action === '2', '主播屏蔽');
+                        toast(action === '2' ? '已踢出该用户' : '已禁言该用户', 'success');
+                      } catch (e: any) {
+                        toast(e.message ?? '操作失败', 'error');
+                      }
+                    }}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity btn-icon w-6 h-6 text-accent-red shrink-0"
+                    title="禁言 / 踢出"
+                  >
+                    <BellOff size={11} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
         <div className="p-3 border-t border-bg-5/40 flex gap-2 relative">
           <button
@@ -927,6 +1102,118 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
           </button>
         </div>
       </aside>
+
+      {showChatSettings && (
+        <ChatSettingsDialog
+          room={liveRoom}
+          onClose={() => setShowChatSettings(false)}
+          onSaved={(updated) => { setLiveRoom(updated); setShowChatSettings(false); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Owner-only modal — slow-mode (0-300s) + subscribers-only. Persists via
+// PATCH /live/rooms/:id/chat-settings. Both fields optional in the API but
+// the dialog always sends both so the UI state is the source of truth.
+function ChatSettingsDialog({ room, onClose, onSaved }: {
+  room: LiveRoom;
+  onClose: () => void;
+  onSaved: (updated: LiveRoom) => void;
+}) {
+  const [slow, setSlow] = useState<number>(room.slowModeSeconds ?? 0);
+  const [subsOnly, setSubsOnly] = useState<boolean>(!!room.chatSubscribersOnly);
+  const [saving, setSaving] = useState(false);
+
+  // Preset slow-mode values — picks cover "off" + 4 common cadences.
+  const presets: { value: number; label: string }[] = [
+    { value: 0,   label: '关闭' },
+    { value: 3,   label: '3s' },
+    { value: 5,   label: '5s' },
+    { value: 10,  label: '10s' },
+    { value: 30,  label: '30s' },
+  ];
+
+  async function save() {
+    setSaving(true);
+    try {
+      const updated = await updateLiveChatSettings(room.id, {
+        slowModeSeconds: slow,
+        chatSubscribersOnly: subsOnly,
+      });
+      toast('已保存弹幕设置', 'success');
+      onSaved(updated);
+    } catch (e: any) {
+      toast(e.message ?? '保存失败', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4 anim-fade" onClick={onClose}>
+      <div className="card w-full max-w-sm p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold flex items-center gap-2">
+          <Settings size={16} className="text-brand-300" /> 弹幕设置
+        </h3>
+
+        <div>
+          <div className="text-xs text-ink-3 mb-2">慢速模式</div>
+          <div className="flex flex-wrap gap-1.5">
+            {presets.map((p) => (
+              <button
+                key={p.value}
+                onClick={() => setSlow(p.value)}
+                className={`px-3 py-1 rounded-full text-xs transition-colors ${
+                  slow === p.value
+                    ? 'bg-brand-500 text-white'
+                    : 'bg-bg-3 text-ink-2 hover:bg-bg-4'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          {/* Free-form slider for anything between 0 and 300s. */}
+          <input
+            type="range"
+            min={0}
+            max={300}
+            step={1}
+            value={slow}
+            onChange={(e) => setSlow(Number(e.target.value))}
+            className="w-full mt-3 accent-brand-500"
+          />
+          <div className="text-[11px] text-ink-4">
+            当前：{slow === 0 ? '关闭' : `每位观众每 ${slow} 秒最多发 1 条`}
+          </div>
+        </div>
+
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={subsOnly}
+            onChange={(e) => setSubsOnly(e.target.checked)}
+            className="mt-0.5 accent-brand-500"
+          />
+          <div>
+            <div className="text-sm">仅关注者可发言</div>
+            <div className="text-[11px] text-ink-4">未关注的观众仍能观看，但弹幕会被拒绝</div>
+          </div>
+        </label>
+
+        <div className="text-[11px] text-ink-4 bg-bg-1/50 rounded px-2 py-1.5">
+          💡 你作为主播不受这两条限制。
+        </div>
+
+        <div className="flex gap-2 justify-end pt-2 border-t border-bg-5/40">
+          <button onClick={onClose} className="btn-secondary">取消</button>
+          <button onClick={save} disabled={saving} className="btn-primary">
+            {saving ? <Loader2 size={14} className="animate-spin" /> : null} 保存
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

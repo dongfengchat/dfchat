@@ -69,6 +69,9 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	g.PATCH("/rooms/:id/schedule", h.setSchedule)     // 直播预告
 	g.POST("/rooms/:id/rotate-key", h.rotateKey)
 	g.POST("/rooms/:id/stop", h.stopLive) // owner force-stop
+	g.PATCH("/rooms/:id/chat-settings", h.updateChatSettings)
+	g.POST("/rooms/:id/pin-danmaku", h.pinDanmaku)
+	g.DELETE("/rooms/:id/pin-danmaku", h.unpinDanmaku)
 	g.DELETE("/rooms/:id", h.deleteRoom)
 	g.GET("/mine", h.listMine)
 
@@ -124,7 +127,16 @@ func (h *Handler) accessRoomForAuthed(c *gin.Context, callerID, roomID int64) *R
 // --- public ---
 
 func (h *Handler) listLive(c *gin.Context) {
-	rooms, err := h.repo.ListLive(c.Request.Context(), 30)
+	// Optional filters for Discover search / category pills. Empty
+	// values disable each filter independently. Limit defaults to 30
+	// (capped at 100 server-side) so a malicious client can't ask for
+	// a million rooms in one go.
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	rooms, err := h.repo.ListLive(c.Request.Context(), ListLiveFilter{
+		Q:        c.Query("q"),
+		Category: c.Query("category"),
+		Limit:    limit,
+	})
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
 		return
@@ -453,6 +465,119 @@ func (h *Handler) stopLive(c *gin.Context) {
 	if h.bus != nil && !rm.IsTest {
 		h.notifyFollowersOffline(c.Request.Context(), rm)
 	}
+	c.Status(http.StatusNoContent)
+}
+
+// === Tier-C chat moderation: settings + pinned danmaku ============
+
+type chatSettingsReq struct {
+	SlowModeSeconds     *int  `json:"slowModeSeconds"`
+	ChatSubscribersOnly *bool `json:"chatSubscribersOnly"`
+}
+
+// updateChatSettings flips slow-mode and subscriber-only in one PATCH.
+// Owner-only. Both fields are optional; nil = leave as-is.
+func (h *Handler) updateChatSettings(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, ok := parseID(c.Param("id"))
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	var req chatSettingsReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "invalid body"})
+		return
+	}
+	// Server-side clamp to match the migration's CHECK; gives a clear
+	// 400 instead of a SQL error from the DB.
+	if req.SlowModeSeconds != nil {
+		s := *req.SlowModeSeconds
+		if s < 0 || s > 300 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80040, "message": "slowModeSeconds must be 0..300"})
+			return
+		}
+	}
+	rm, err := h.repo.UpdateChatSettings(c.Request.Context(), id, uid, req.SlowModeSeconds, req.ChatSubscribersOnly)
+	if errors.Is(err, ErrNotOwner) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 80012, "message": "not the owner"})
+		return
+	}
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	h.broadcastRoomUpdated(c.Request.Context(), rm)
+	c.JSON(http.StatusOK, gin.H{"room": rm})
+}
+
+type pinDanmakuReq struct {
+	Text     string `json:"text"`
+	Color    string `json:"color"`
+	SenderID string `json:"senderId"` // optional; defaults to caller (owner is pinning their own message)
+}
+
+// pinDanmaku snapshots a single message into the room metadata so late
+// joiners see it at the top of the chat. Replaces any existing pinned
+// danmaku. Empty text via DELETE endpoint clears it.
+func (h *Handler) pinDanmaku(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, ok := parseID(c.Param("id"))
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	var req pinDanmakuReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "invalid body"})
+		return
+	}
+	text := strings.TrimSpace(req.Text)
+	if text == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80041, "message": "text required"})
+		return
+	}
+	if len([]rune(text)) > 200 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80042, "message": "text too long (max 200)"})
+		return
+	}
+	senderID := uid
+	if req.SenderID != "" {
+		if v, err := strconv.ParseInt(req.SenderID, 10, 64); err == nil && v > 0 {
+			senderID = v
+		}
+	}
+	rm, err := h.repo.PinDanmaku(c.Request.Context(), id, uid, text, req.Color, senderID)
+	if errors.Is(err, ErrNotOwner) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 80012, "message": "not the owner"})
+		return
+	}
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	h.broadcastRoomUpdated(c.Request.Context(), rm)
+	c.JSON(http.StatusOK, gin.H{"room": rm})
+}
+
+// unpinDanmaku clears the pinned-danmaku snapshot on the room.
+func (h *Handler) unpinDanmaku(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, ok := parseID(c.Param("id"))
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	rm, err := h.repo.PinDanmaku(c.Request.Context(), id, uid, "", "", uid)
+	if errors.Is(err, ErrNotOwner) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 80012, "message": "not the owner"})
+		return
+	}
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	h.broadcastRoomUpdated(c.Request.Context(), rm)
 	c.Status(http.StatusNoContent)
 }
 
