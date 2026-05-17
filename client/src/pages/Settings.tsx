@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
+  Activity,
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
@@ -16,18 +17,21 @@ import {
   Trash2,
   UserCircle,
   X,
+  XCircle,
 } from 'lucide-react';
 import {
   changePassword,
   deleteMe,
   listSessions,
   logoutServer,
+  recentLogins,
   requestEmailChange,
   revokeOtherSessions,
   revokeSession,
   sendVerificationEmail,
   updateMe,
   uploadBlob,
+  type LoginLogEntry,
 } from '@/api/client';
 import { useSeqStore } from '@/sync/seqStore';
 import { useUserStore } from '@/store/userStore';
@@ -503,6 +507,8 @@ function SecurityTab() {
         更新密码
       </button>
 
+      <RecentLoginsCard />
+
       <div className="pt-6 mt-6 border-t border-bg-5/40 space-y-3">
         <div>
           <h3 className="text-sm font-semibold text-accent-red flex items-center gap-1.5">
@@ -548,6 +554,107 @@ function SecurityTab() {
       </div>
     </section>
   );
+}
+
+// RecentLoginsCard surfaces the user's own login history so they can
+// spot a hostile login ("I never logged in from 1.2.3.4 last Tuesday").
+// Pulls the server's last 20 attempts. Failures are shown in red — a
+// streak of failed-from-strange-IP followed by a success is exactly
+// the phishing signal we want to expose.
+function RecentLoginsCard() {
+  const [logs, setLogs] = useState<LoginLogEntry[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState(true);
+
+  async function load() {
+    try {
+      setErr(null);
+      setLogs(await recentLogins());
+    } catch (e: any) {
+      setErr(e.message ?? '加载失败');
+    }
+  }
+  useEffect(() => { void load(); }, []);
+
+  return (
+    <div className="pt-6 mt-6 border-t border-bg-5/40 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold flex items-center gap-1.5">
+            <Activity size={14} className="text-brand-300" /> 登录历史
+          </h3>
+          <p className="text-xs text-ink-3 mt-1">
+            出现陌生 IP 或失败记录？立刻 <span className="text-brand-300">改密码</span> + <span className="text-brand-300">在「设备」里退出全部</span>
+          </p>
+        </div>
+        <button onClick={load} className="btn-icon w-7 h-7" title="刷新">
+          <Activity size={12} />
+        </button>
+      </div>
+
+      {err ? (
+        <div className="text-xs text-accent-red">{err}</div>
+      ) : !logs ? (
+        <div className="text-xs text-ink-4">加载中…</div>
+      ) : logs.length === 0 ? (
+        <div className="text-xs text-ink-4">还没有登录记录</div>
+      ) : (
+        <>
+          <ul className="space-y-1.5">
+            {(collapsed ? logs.slice(0, 5) : logs).map((l) => (
+              <li
+                key={l.id}
+                className={`flex items-center gap-2 text-xs py-1.5 px-2 rounded ${
+                  l.success ? 'bg-bg-2' : 'bg-accent-red/10 border border-accent-red/30'
+                }`}
+              >
+                {l.success ? (
+                  <CheckCircle2 size={12} className="text-accent-green shrink-0" />
+                ) : (
+                  <XCircle size={12} className="text-accent-red shrink-0" />
+                )}
+                <span className="font-mono text-ink-1 shrink-0">{l.ip || '—'}</span>
+                <span className="text-ink-3 shrink-0">
+                  {new Date(l.createdAt).toLocaleString('zh-CN', { hour12: false })}
+                </span>
+                <span className="text-ink-4 truncate" title={l.userAgent}>
+                  {shortUserAgent(l.userAgent)}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {logs.length > 5 && (
+            <button
+              onClick={() => setCollapsed((c) => !c)}
+              className="text-xs text-brand-300 hover:text-brand-200"
+            >
+              {collapsed ? `展开剩余 ${logs.length - 5} 条` : '收起'}
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// shortUserAgent turns a verbose UA string into a one-glance label.
+// Best-effort heuristics — UA strings are unstandardised, but we just
+// want "macOS / Chrome 124"-shaped output for the timeline.
+function shortUserAgent(ua: string): string {
+  if (!ua) return '';
+  let os = '其它';
+  if (/Mac OS X/i.test(ua)) os = 'macOS';
+  else if (/Windows/i.test(ua)) os = 'Windows';
+  else if (/Linux/i.test(ua)) os = 'Linux';
+  else if (/Android/i.test(ua)) os = 'Android';
+  else if (/iPhone|iPad/i.test(ua)) os = 'iOS';
+  let app = '';
+  if (/Electron/i.test(ua)) app = 'DFCHAT';
+  else if (/Edg\//i.test(ua)) app = 'Edge';
+  else if (/Chrome\//i.test(ua)) app = 'Chrome';
+  else if (/Firefox\//i.test(ua)) app = 'Firefox';
+  else if (/Safari\//i.test(ua)) app = 'Safari';
+  return app ? `${os} · ${app}` : os;
 }
 
 function DevicesTab() {
@@ -639,19 +746,104 @@ function DevicesTab() {
 }
 
 function AboutTab() {
+  const [checkResult, setCheckResult] = useState<null | {
+    state: 'idle' | 'checking' | 'latest' | 'available' | 'error';
+    latest?: string;
+    downloadUrl?: string;
+    notes?: string;
+    err?: string;
+  }>({ state: 'idle' });
+
+  async function check() {
+    if (!window.electronAPI?.checkForUpdates) return;
+    setCheckResult({ state: 'checking' });
+    try {
+      const r = await window.electronAPI.checkForUpdates();
+      if (r.available) {
+        setCheckResult({ state: 'available', latest: r.latest, downloadUrl: r.downloadUrl, notes: r.notes });
+      } else {
+        setCheckResult({ state: 'latest', latest: r.latest });
+      }
+    } catch (e: any) {
+      setCheckResult({ state: 'error', err: e?.message ?? '检查失败' });
+    }
+  }
+
   return (
-    <section className="card p-6 space-y-4 anim-fade">
+    <section className="card p-6 space-y-5 anim-fade">
       <div>
         <h2 className="text-base font-semibold">关于东风快信</h2>
         <p className="text-xs text-ink-3 mt-1">PC 端聊天 + 直播桌面客户端</p>
       </div>
+
+      {/* Version block — big, prominent. Useful when reporting bugs. */}
+      <div className="rounded-lg border border-bg-5/40 bg-bg-2 p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-xs text-ink-3">当前版本</div>
+            <div className="text-2xl font-mono font-semibold text-ink-1 mt-1">
+              v{__APP_VERSION__}
+            </div>
+          </div>
+          {window.electronAPI?.checkForUpdates && (
+            <button
+              onClick={check}
+              disabled={checkResult?.state === 'checking'}
+              className="btn-secondary text-xs"
+            >
+              {checkResult?.state === 'checking' ? (
+                <><Loader2 size={12} className="animate-spin" /> 检查中…</>
+              ) : (
+                <>立即检查更新</>
+              )}
+            </button>
+          )}
+        </div>
+        {checkResult?.state === 'latest' && (
+          <div className="mt-3 text-xs text-accent-green flex items-center gap-1.5">
+            <CheckCircle2 size={12} /> 已是最新版本
+            {checkResult.latest && <span className="text-ink-4 ml-1">（v{checkResult.latest}）</span>}
+          </div>
+        )}
+        {checkResult?.state === 'available' && (
+          <div className="mt-3 p-3 rounded-md bg-brand-500/10 border border-brand-500/40">
+            <div className="text-xs text-brand-200 flex items-center gap-1.5">
+              发现新版本 <span className="font-mono font-semibold">v{checkResult.latest}</span>
+            </div>
+            {checkResult.notes && (
+              <div className="text-xs text-ink-3 mt-1.5 leading-relaxed">{checkResult.notes}</div>
+            )}
+            <button
+              onClick={() => window.electronAPI?.installUpdate({ downloadUrl: checkResult.downloadUrl })}
+              className="btn-primary text-xs mt-3"
+            >
+              立即下载
+            </button>
+          </div>
+        )}
+        {checkResult?.state === 'error' && (
+          <div className="mt-3 text-xs text-accent-red">检查失败：{checkResult.err}</div>
+        )}
+      </div>
+
+      {/* System info */}
       <dl className="text-sm space-y-2">
-        <div className="flex justify-between"><dt className="text-ink-3">版本</dt><dd className="text-ink-1">v{__APP_VERSION__}</dd></div>
-        <div className="flex justify-between"><dt className="text-ink-3">客户端运行环境</dt><dd className="text-ink-1">{window.electronAPI ? `Electron ${window.electronAPI.version}` : '浏览器'}</dd></div>
-        <div className="flex justify-between"><dt className="text-ink-3">服务端</dt><dd className="text-ink-1">{import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'}</dd></div>
+        <div className="flex justify-between">
+          <dt className="text-ink-3">客户端运行环境</dt>
+          <dd className="text-ink-1">{window.electronAPI ? `Electron ${window.electronAPI.version}` : '浏览器'}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-ink-3">系统平台</dt>
+          <dd className="text-ink-1 font-mono">{window.electronAPI?.platform ?? navigator.platform}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-ink-3">服务端</dt>
+          <dd className="text-ink-1 font-mono text-xs truncate max-w-[260px]">{import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'}</dd>
+        </div>
       </dl>
+
       {window.electronAPI?.openLogsFolder && (
-        <div className="pt-2">
+        <div className="pt-2 border-t border-bg-5/30">
           <button
             onClick={() => window.electronAPI?.openLogsFolder?.()}
             className="btn-secondary text-xs"
@@ -665,7 +857,7 @@ function AboutTab() {
         </div>
       )}
       <p className="text-xs text-ink-4 pt-4 border-t border-bg-5/30">
-        © 2026 东方信息. 本软件部分开源组件版权归各自作者所有。
+        © 2026 东方信息 · 东风快信. 本软件部分开源组件版权归各自作者所有。
       </p>
     </section>
   );

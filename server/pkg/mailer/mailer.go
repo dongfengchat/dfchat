@@ -39,9 +39,24 @@ func (m *Mailer) Enabled() bool { return m.cfg.Host != "" }
 // Send delivers a plain-text email. Subject is the message subject;
 // body is the plain-text body (UTF-8).
 func (m *Mailer) Send(to, subject, body string) error {
+	return m.sendInternal(to, subject, body, "")
+}
+
+// SendHTML delivers a multipart-alternative email with both a plain-text
+// fallback and a styled HTML body. Most mail clients render the HTML;
+// terminal MUAs and older gateways fall back cleanly to the text part.
+func (m *Mailer) SendHTML(to, subject, textBody, htmlBody string) error {
+	return m.sendInternal(to, subject, textBody, htmlBody)
+}
+
+func (m *Mailer) sendInternal(to, subject, textBody, htmlBody string) error {
 	if !m.Enabled() {
+		preview := textBody
+		if preview == "" {
+			preview = htmlBody
+		}
 		m.log.Info("mail (dev — no SMTP configured)",
-			"to", to, "subject", subject, "body_preview", trunc(body, 240))
+			"to", to, "subject", subject, "body_preview", trunc(preview, 240))
 		return nil
 	}
 
@@ -55,7 +70,12 @@ func (m *Mailer) Send(to, subject, body string) error {
 	// with 555 5.5.2.
 	envelopeFrom := extractAddr(from)
 
-	msg := buildMessage(from, to, subject, body)
+	var msg []byte
+	if htmlBody == "" {
+		msg = buildMessage(from, to, subject, textBody)
+	} else {
+		msg = buildMultipartMessage(from, to, subject, textBody, htmlBody)
+	}
 
 	if m.cfg.UseTLS {
 		if err := sendImplicitTLS(addr, m.cfg.Host, m.cfg.User, m.cfg.Password, envelopeFrom, to, msg, m.log); err != nil {
@@ -131,6 +151,55 @@ func buildMessage(from, to, subject, body string) []byte {
 	b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
 	b.WriteString("\r\n")
 	b.WriteString(body)
+	return []byte(b.String())
+}
+
+// buildMultipartMessage builds a multipart/alternative MIME message
+// with both a text/plain and a text/html part. Gmail, Outlook, QQ Mail
+// etc. render the HTML; terminal clients and weak gateways fall back
+// to the plain text. Boundary is a deterministic random-ish string
+// — collisions with body content are essentially impossible at 16 hex
+// chars.
+func buildMultipartMessage(from, to, subject, textBody, htmlBody string) []byte {
+	boundary := fmt.Sprintf("dfchat_%x", time.Now().UnixNano())
+	var b strings.Builder
+	b.WriteString("From: ")
+	b.WriteString(from)
+	b.WriteString("\r\n")
+	b.WriteString("To: ")
+	b.WriteString(to)
+	b.WriteString("\r\n")
+	b.WriteString("Subject: ")
+	b.WriteString(mimeBEncode(subject))
+	b.WriteString("\r\n")
+	b.WriteString("Date: ")
+	b.WriteString(time.Now().UTC().Format(time.RFC1123Z))
+	b.WriteString("\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: multipart/alternative; boundary=\"")
+	b.WriteString(boundary)
+	b.WriteString("\"\r\n\r\n")
+
+	// Plain-text part first. RFC 2046 §5.1.4: "the alternatives appear in
+	// an order of increasing faithfulness to the original content. The
+	// best choice is the LAST part of a type supported by the recipient
+	// system's local environment."
+	b.WriteString("--")
+	b.WriteString(boundary)
+	b.WriteString("\r\nContent-Type: text/plain; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+	b.WriteString(textBody)
+	b.WriteString("\r\n\r\n")
+
+	// HTML part second (preferred).
+	b.WriteString("--")
+	b.WriteString(boundary)
+	b.WriteString("\r\nContent-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+	b.WriteString(htmlBody)
+	b.WriteString("\r\n\r\n--")
+	b.WriteString(boundary)
+	b.WriteString("--\r\n")
 	return []byte(b.String())
 }
 

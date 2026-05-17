@@ -31,6 +31,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update:available', h);
     return () => ipcRenderer.removeListener('update:available', h);
   },
+  // Manual check-for-updates from Settings → 关于.
+  checkForUpdates: () =>
+    ipcRenderer.invoke('update:checkNow') as Promise<{
+      current: string;
+      latest?: string;
+      available: boolean;
+      downloadUrl?: string;
+      notes?: string;
+    }>,
 
   // Diagnostics: forward renderer errors to main, which appends them to
   // app.getPath('logs')/crash-<date>.log. Also exposes "open logs folder"

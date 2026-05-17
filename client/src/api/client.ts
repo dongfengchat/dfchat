@@ -745,6 +745,23 @@ export async function resetPassword(token: string, newPassword: string): Promise
   } catch (e) { throw unwrapError(e); }
 }
 
+export interface LoginLogEntry {
+  id: string;
+  success: boolean;
+  ip: string;
+  userAgent: string;
+  createdAt: string;
+}
+
+export async function recentLogins(): Promise<LoginLogEntry[]> {
+  try {
+    const res = await api.get<{ logs: LoginLogEntry[] }>('/api/v1/auth/recent-logins');
+    return res.data.logs ?? [];
+  } catch (e) {
+    throw unwrapError(e);
+  }
+}
+
 export async function sendVerificationEmail(): Promise<{ ok: boolean; alreadyVerified?: boolean; devLink?: string }> {
   try {
     const res = await api.post<{ ok: boolean; alreadyVerified?: boolean; devLink?: string }>('/api/v1/auth/send-verification');

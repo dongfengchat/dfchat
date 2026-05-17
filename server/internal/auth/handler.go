@@ -88,6 +88,7 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	guarded.POST("/sessions/revoke-others", h.revokeOthers)
 	guarded.POST("/send-verification", h.sendVerification)
 	guarded.POST("/request-email-change", h.requestEmailChange)
+	guarded.GET("/recent-logins", h.recentLogins)
 }
 
 // ============= Email verification + Password reset ==============
@@ -276,8 +277,10 @@ func (h *Handler) requestEmailChange(c *gin.Context) {
 
 	apiBase := strings.Replace(strings.TrimRight(h.publicBaseURL, "/"), "://", "://app.", 1)
 	link := fmt.Sprintf("%s/api/v1/auth/confirm-email-change?token=%s", apiBase, tok)
-	body := fmt.Sprintf("你好，\n\n收到了将 DFCHAT 账号邮箱改为这个地址的请求。点击下方链接确认（1 小时内有效）：\n\n%s\n\n如果不是你本人操作，请忽略此邮件；当前邮箱不会被改变。\n\n— DFCHAT", link)
-	_ = h.mailer.Send(newEmail, "确认 DFCHAT 邮箱变更", body)
+	const expiryHint = "链接 1 小时内有效"
+	_ = h.mailer.SendHTML(newEmail, "确认 DFCHAT 邮箱变更",
+		renderEmailText(emailEmailChange, link, expiryHint),
+		renderEmailHTML(emailEmailChange, link, expiryHint))
 
 	resp := gin.H{"ok": true}
 	if !h.mailer.Enabled() {
@@ -390,8 +393,10 @@ func (h *Handler) forgotPassword(c *gin.Context) {
 
 	// Static HTML page on the marketing site handles the form + POST to API.
 	link := fmt.Sprintf("%s/reset-password.html?token=%s", strings.TrimRight(h.publicBaseURL, "/"), tok)
-	body := fmt.Sprintf("你好，\n\n收到了重置 DFCHAT 密码的请求。点击下方链接设置新密码（1 小时内有效）：\n\n%s\n\n如果不是你本人操作，请忽略此邮件；你的密码不会被改变。\n\n— DFCHAT", link)
-	_ = h.mailer.Send(email, "重置 DFCHAT 密码", body)
+	const expiryHint = "链接 1 小时内有效"
+	_ = h.mailer.SendHTML(email, "重置 DFCHAT 密码",
+		renderEmailText(emailPasswordReset, link, expiryHint),
+		renderEmailHTML(emailPasswordReset, link, expiryHint))
 
 	resp := gin.H{"ok": true}
 	if !h.mailer.Enabled() {
@@ -714,8 +719,10 @@ func (h *Handler) sendVerificationFor(ctx context.Context, uid int64, email stri
 	}
 	apiBase := strings.Replace(strings.TrimRight(h.publicBaseURL, "/"), "://", "://app.", 1)
 	link := fmt.Sprintf("%s/api/v1/auth/verify-email?token=%s", apiBase, tok)
-	body := fmt.Sprintf("你好，\n\n感谢注册 DFCHAT。点击下方链接验证你的邮箱（24 小时内有效）：\n\n%s\n\n如果不是你本人操作，请忽略此邮件。\n\n— DFCHAT", link)
-	_ = h.mailer.Send(email, "验证你的 DFCHAT 邮箱", body)
+	const expiryHint = "链接 24 小时内有效"
+	_ = h.mailer.SendHTML(email, "验证你的 DFCHAT 邮箱",
+		renderEmailText(emailVerify, link, expiryHint),
+		renderEmailHTML(emailVerify, link, expiryHint))
 	return link
 }
 
@@ -746,9 +753,13 @@ func (h *Handler) login(c *gin.Context) {
 	switch {
 	case errors.Is(err, ErrInvalidCredentials):
 		recordLoginFailure(req.Login)
+		// Failed login — log with NULL user_id (we don't know who
+		// they were claiming to be / no row matched). Best-effort.
+		h.logLoginAttempt(c, 0, req.Login, false)
 		fail(c, http.StatusUnauthorized, 10022, "账号或密码错误")
 		return
 	case errors.Is(err, ErrAccountDisabled):
+		h.logLoginAttempt(c, 0, req.Login, false)
 		fail(c, http.StatusForbidden, 10023, "账号已被停用")
 		return
 	case err != nil:
@@ -758,6 +769,7 @@ func (h *Handler) login(c *gin.Context) {
 	// Successful auth — clear the failure counter so honest typos
 	// don't accumulate across login sessions.
 	recordLoginSuccess(req.Login)
+	h.logLoginAttempt(c, res.User.ID, req.Login, true)
 	c.JSON(http.StatusOK, gin.H{
 		"accessToken":  res.AccessToken,
 		"refreshToken": res.RefreshToken,

@@ -26,6 +26,13 @@ interface ElectronAPI {
   getPlatform: () => Promise<string>;
   installUpdate: (payload?: { downloadUrl?: string }) => Promise<void>;
   onUpdateAvailable: (cb: (info: { version: string; downloadUrl?: string; notes?: string }) => void) => () => void;
+  checkForUpdates: () => Promise<{
+    current: string;
+    latest?: string;
+    available: boolean;
+    downloadUrl?: string;
+    notes?: string;
+  }>;
   reportError: (payload: { message: string; stack?: string; ctx?: string }) => Promise<void>;
   openLogsFolder: () => Promise<void>;
 }

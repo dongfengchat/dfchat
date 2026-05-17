@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	authdomain "github.com/dongfang/dfchat/server/internal/auth"
 	"github.com/dongfang/dfchat/server/pkg/audit"
 	"github.com/dongfang/dfchat/server/pkg/auth"
 	"github.com/dongfang/dfchat/server/pkg/middleware"
@@ -30,6 +31,7 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	g.GET("/stats", h.stats)
 	g.GET("/users", h.listUsers)
 	g.PATCH("/users/:id/status", h.patchUserStatus)
+	g.GET("/users/:id/logins", h.userLoginHistory)
 	g.GET("/account-pool", h.accountPoolStats)
 
 	// Live moderation — platform admin view + actions on any room.
@@ -151,6 +153,27 @@ func joinAnd(ss []string) string {
 		out += " AND " + ss[i]
 	}
 	return out
+}
+
+// userLoginHistory returns the most recent login attempts for a target
+// user. Admin uses this to investigate "did account X actually log in
+// from country Y on date Z" after a support ticket.
+func (h *Handler) userLoginHistory(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 70020, "message": "invalid id"})
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	out, err := authdomain.LoadLoginsForUser(c.Request.Context(), h.pool, id, limit)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"logs": out})
 }
 
 // ===== Account-number pool stats =====

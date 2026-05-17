@@ -157,6 +157,28 @@ function setupIpc() {
     const url = payload?.downloadUrl || 'https://dfchat.chat/#download';
     shell.openExternal(url);
   });
+
+  // Manual "check now" trigger from Settings → 关于. Returns the result
+  // synchronously so the UI can show "已是最新" / "发现新版本 vX.Y.Z".
+  ipcMain.handle('update:checkNow', async (): Promise<{
+    current: string;
+    latest?: string;
+    available: boolean;
+    downloadUrl?: string;
+    notes?: string;
+  }> => {
+    const current = app.getVersion();
+    const m = await fetchManifest();
+    if (!m?.version) return { current, available: false };
+    const available = compareSemver(m.version, current) > 0;
+    return {
+      current,
+      latest: m.version,
+      available,
+      downloadUrl: available ? pickDownloadUrl(m) : undefined,
+      notes: m.notes,
+    };
+  });
 }
 
 function redDotPngBuffer(): Buffer {

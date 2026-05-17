@@ -22,6 +22,12 @@ const unverifiedRetention = 14 * 24 * time.Hour
 // `psql` more readable.
 const expiredTokenRetention = 7 * 24 * time.Hour
 
+// loginLogRetention bounds how long we keep per-attempt login history.
+// 90 days is enough for account-takeover forensics (typical detection
+// window is days, not months). Anything older a) almost certainly
+// won't be referenced, and b) creates GDPR-shaped privacy debt.
+const loginLogRetention = 90 * 24 * time.Hour
+
 // RunCleanupLoop sweeps the database every hour:
 //   - Hard-deletes users that registered > unverifiedRetention ago and
 //     never verified their email. ON DELETE CASCADE drops their tokens
@@ -117,5 +123,16 @@ func sweep(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) {
 		log.Warn("auth cleanup: clear stale reservations failed", "err", err.Error())
 	} else if n := tag.RowsAffected(); n > 0 {
 		log.Info("auth cleanup: cleared stale reservations", "count", n)
+	}
+
+	// Login logs older than the retention window. Forensic value past
+	// 90d is near zero; storage + privacy cost grows linearly.
+	tag, err = pool.Exec(sctx,
+		`DELETE FROM login_logs WHERE created_at < $1`,
+		time.Now().Add(-loginLogRetention))
+	if err != nil {
+		log.Warn("auth cleanup: gc login logs failed", "err", err.Error())
+	} else if n := tag.RowsAffected(); n > 0 {
+		log.Info("auth cleanup: gc login logs", "count", n)
 	}
 }
