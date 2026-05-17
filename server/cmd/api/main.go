@@ -135,6 +135,20 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
+	// CRITICAL: by default Gin trusts every proxy, which means
+	// c.ClientIP() honors X-Forwarded-For from any source. Anyone could
+	// then forge their IP to bypass our rate limiters, IP-pinned account
+	// draws, login-log auditing, and per-IP caps. In prod we sit behind
+	// exactly one nginx (in the docker bridge network), so trust only
+	// that network. In dev (no proxy), pass an empty slice → no proxy
+	// trusted → ClientIP returns the connection's RemoteAddr directly.
+	if cfg.AppEnv == "development" {
+		_ = r.SetTrustedProxies(nil)
+	} else {
+		// docker default bridge subnet — covers both deploy_default and
+		// any custom compose network we might be on.
+		_ = r.SetTrustedProxies([]string{"172.16.0.0/12", "10.0.0.0/8", "127.0.0.1"})
+	}
 	r.Use(gin.Recovery())
 	r.Use(middleware.CORS(cfg.CORSAllowOrigins))
 	r.Use(requestLogger(log))
