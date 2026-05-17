@@ -7,7 +7,7 @@
 # Pre-requisites:
 #   1. setup-https.sh already ran (cert for app.+files. already exists)
 #   2. DNS A: dfchat.chat → 198.44.238.9   (and optionally www. → same)
-#   3. /opt/dfchat/web/dist/ will be created and filled by deploy-web.sh
+#   3. /opt/dfchat/web/ will be filled by deploy-web.sh
 
 set -euo pipefail
 trap 'echo "❌ setup-website failed on line $LINENO" >&2' ERR
@@ -73,12 +73,16 @@ $SSH "cp -L ${REMOTE_DIR}/data/letsencrypt/live/dfchat/fullchain.pem ${REMOTE_DI
       chmod 644 ${REMOTE_DIR}/data/minio-certs/public.crt && \
       chmod 600 ${REMOTE_DIR}/data/minio-certs/private.key"
 
-# ---- 3. Push the static site to /opt/dfchat/web/dist/ ---------------
+# ---- 3. Push the static site to /opt/dfchat/web/ --------------------
+# nginx serves from /var/www/dfchat (mount of /opt/dfchat/web). We used
+# to nest a /dist subdir here but deploy.sh's project-wide rsync would
+# overwrite it to the local web/ flat layout — so keep flat throughout.
 echo "==> 3/5 rsync website"
-$SSH "mkdir -p ${REMOTE_DIR}/web/dist ${REMOTE_DIR}/web/download"
+$SSH "mkdir -p ${REMOTE_DIR}/web/download"
 rsync -az --delete \
   -e "sshpass -p ${PASSWORD} ssh -p ${PORT} -o StrictHostKeyChecking=accept-new" \
-  web/ "${USER}@${HOST}:${REMOTE_DIR}/web/dist/"
+  --exclude '/download/' \
+  web/ "${USER}@${HOST}:${REMOTE_DIR}/web/"
 
 # ---- 4. Write nginx config with apex server block + /download/ ------
 SERVER_NAMES="$BASE_DOMAIN"
@@ -140,7 +144,7 @@ http {
     add_header Strict-Transport-Security "max-age=31536000" always;
     add_header X-Content-Type-Options nosniff always;
 
-    root /var/www/dfchat/dist;
+    root /var/www/dfchat;
     index index.html;
 
     # /download/<filename> — installer binaries served with attachment header
