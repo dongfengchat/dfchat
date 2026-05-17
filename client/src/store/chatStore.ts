@@ -66,6 +66,47 @@ function cacheMessages(convId: string, msgs: ChatMessage[]) {
   } catch { /* ignore quota */ }
 }
 
+// RetentionWindow mirrors the server's message.RetentionWindow constant
+// in Go. Past this point the server can no longer recall / edit /
+// delete a message — only the client's local archive holds it. Keep
+// these two numbers in sync if the server changes its retention.
+const RETENTION_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+function isPastAuthorityWindow(createdAt: string | number | Date): boolean {
+  const t = typeof createdAt === 'number' ? createdAt : new Date(createdAt).getTime();
+  if (!Number.isFinite(t)) return false; // bad input — don't reject
+  return Date.now() - t > RETENTION_WINDOW_MS;
+}
+
+// archiveAppend / archiveRemove are write-through helpers around the
+// encrypted local SQLite archive exposed by the Electron preload.
+// They no-op in environments without the preload (vite browser dev
+// mode, web embedding), letting the rest of the store work either
+// way. Mapped to string-shaped fields because IPC strips non-JSON
+// types (BigInt etc.).
+function archiveAppend(msg: ChatMessage) {
+  const a = (typeof window !== 'undefined' && window.dfchatArchive) || undefined;
+  if (!a) return;
+  void a.append({
+    id: msg.id,
+    conversationId: msg.conversationId,
+    senderId: msg.senderId,
+    type: msg.type,
+    content: msg.content,
+    seq: msg.seq,
+    mentions: msg.mentions?.map(String),
+    replyTo: msg.replyTo != null ? String(msg.replyTo) : undefined,
+    isRecalled: !!msg.isRecalled,
+    editedAt: msg.editedAt,
+    editCount: msg.editCount,
+    createdAt: msg.createdAt,
+  });
+}
+function archiveRemove(messageId: string) {
+  const a = (typeof window !== 'undefined' && window.dfchatArchive) || undefined;
+  if (!a) return;
+  void a.remove(messageId);
+}
+
 function loadAllCached(): Record<string, ChatMessage[]> {
   const out: Record<string, ChatMessage[]> = {};
   try {
@@ -106,6 +147,11 @@ export const useChatStore = create<ChatState>((set) => ({
   setMessages: (convId, msgs) => {
     const ordered = [...msgs].reverse();
     cacheMessages(convId, ordered);
+    // Mirror the just-fetched server window into the encrypted archive
+    // so it's available offline + persists past the server's 30-day
+    // retention. Each row goes through the existing write-through
+    // helper which encrypts before persisting.
+    for (const m of ordered) archiveAppend(m);
     set((s) => ({ messagesByConv: { ...s.messagesByConv, [convId]: ordered } }));
   },
 
@@ -121,6 +167,7 @@ export const useChatStore = create<ChatState>((set) => ({
         if (seen.has(m.id)) continue;
         merged.push(m);
         seen.add(m.id);
+        archiveAppend(m);
       }
       merged.sort((a, b) => a.seq - b.seq);
       cacheMessages(convId, merged);
@@ -129,6 +176,10 @@ export const useChatStore = create<ChatState>((set) => ({
 
   appendMessage: (msg) => {
     useSeqStore.getState().bumpLast(msg.conversationId, msg.seq);
+    // Write-through to the encrypted local archive. The archive is
+    // the long-term store; this in-memory map is just the hot cache.
+    // Fire-and-forget — IPC errors are caught + logged in main.
+    archiveAppend(msg);
     set((s) => {
       const existing = s.messagesByConv[msg.conversationId] ?? [];
       if (existing.some((m) => m.id === msg.id)) return s;
@@ -138,7 +189,23 @@ export const useChatStore = create<ChatState>((set) => ({
     });
   },
 
-  replaceMessage: (msg) =>
+  replaceMessage: (msg) => {
+    // Tamper-rejection gate: the server is only allowed to mutate
+    // history within its 30-day authority window (RetentionWindow on
+    // the server). If a chat.edit / chat.recall event arrives for a
+    // message older than that, refuse to apply it locally — the
+    // archive copy is the canonical truth past that horizon.
+    if (isPastAuthorityWindow(msg.createdAt)) {
+      // eslint-disable-next-line no-console
+      console.warn('[archive] rejecting server mutation of expired message', {
+        id: msg.id, createdAt: msg.createdAt,
+      });
+      return;
+    }
+    // Mirror the new state into the encrypted archive first so even
+    // if the in-memory store hasn't been hydrated for this conv we
+    // still record the updated row.
+    archiveAppend(msg);
     set((s) => {
       const existing = s.messagesByConv[msg.conversationId];
       if (!existing) return s;
@@ -148,15 +215,35 @@ export const useChatStore = create<ChatState>((set) => ({
       next[idx] = msg;
       cacheMessages(msg.conversationId, next);
       return { messagesByConv: { ...s.messagesByConv, [msg.conversationId]: next } };
-    }),
+    });
+  },
 
   // removeMessage drops a message from the in-memory view + the
   // localStorage cache. Used when the server hard-deletes a message
   // (chat.delete WS event) or when the author chose "delete" in the
-  // context menu. Phase 2 will introduce a separate persistent
-  // archive that is NOT affected by this — the local copy survives
-  // even after the server's view of the message is gone.
-  removeMessage: (convId, messageId) =>
+  // context menu.
+  //
+  // The local archive is INTENTIONALLY NOT touched here when the
+  // origin is a server event for a message older than 30 days — the
+  // archive is the user's permanent copy and only the user can
+  // request its deletion. For messages still within the server's
+  // 30-day authority window, the archive does mirror the deletion
+  // so re-hydration after restart doesn't bring the message back.
+  removeMessage: (convId, messageId) => {
+    // We don't know createdAt here (it isn't in the WS chat.delete
+    // payload), so we look the message up in the in-memory view to
+    // make the call. If we can't find it (already dropped), we
+    // err on the safe side and KEEP the archive row — better to
+    // preserve user data than discard it on ambiguous input.
+    const current = (useChatStore.getState().messagesByConv[convId] ?? []).find((m) => m.id === messageId);
+    if (current && !isPastAuthorityWindow(current.createdAt)) {
+      archiveRemove(messageId);
+    } else if (current) {
+      // eslint-disable-next-line no-console
+      console.warn('[archive] keeping archive row for expired-window delete', {
+        id: messageId, createdAt: current.createdAt,
+      });
+    }
     set((s) => {
       const existing = s.messagesByConv[convId];
       if (!existing) return s;
@@ -164,7 +251,8 @@ export const useChatStore = create<ChatState>((set) => ({
       if (next.length === existing.length) return s;
       cacheMessages(convId, next);
       return { messagesByConv: { ...s.messagesByConv, [convId]: next } };
-    }),
+    });
+  },
 
   applyReactionUpdate: (convId, messageId, reactions) =>
     set((s) => {

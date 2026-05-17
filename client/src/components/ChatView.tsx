@@ -376,9 +376,53 @@ export default function ChatView() {
     let cancelled = false;
     setLoadingHistory(true);
     setReplyingTo(null);
+
+    // Instant hydrate from the encrypted local archive (if available)
+    // so the user sees their previous messages immediately — including
+    // messages older than the server's 30-day retention window. The
+    // server fetch below then layers the latest server-state on top,
+    // overwriting any rows that still exist server-side and adding
+    // anything new that arrived while we were offline.
+    const archive = (typeof window !== 'undefined' && window.dfchatArchive) || undefined;
+    if (archive) {
+      archive
+        .queryByConv(ctx.convId, 200)
+        .then((rows) => {
+          if (cancelled || rows.length === 0) return;
+          // queryByConv returns newest-first; setMessages expects
+          // newest-first too (it reverses internally). Just hand it over.
+          const mapped: ChatMessage[] = rows.map((r) => ({
+            id: r.id,
+            conversationId: r.conversationId,
+            senderId: r.senderId,
+            type: r.type,
+            content: r.content as ChatMessage['content'],
+            seq: r.seq,
+            mentions: r.mentions?.map((s) => Number(s)),
+            replyTo: r.replyTo != null ? Number(r.replyTo) : undefined,
+            isRecalled: r.isRecalled,
+            editedAt: r.editedAt,
+            editCount: r.editCount,
+            createdAt: r.createdAt,
+          }));
+          // Use mergeMessages so the server pull below can layer over
+          // without losing locally-archived rows past the server's
+          // 30-day window.
+          useChatStore.getState().mergeMessages(ctx.convId, mapped);
+        })
+        .catch(() => { /* archive missing → no-op, server pull continues */ });
+    }
+
     listMessages(ctx.convId)
       .then((msgs) => {
-        if (!cancelled) setMessages(ctx.convId, msgs);
+        if (cancelled) return;
+        if (archive) {
+          // We already showed the archive; merge in server's latest so
+          // edits / recalls / deletes within the 30-day window land.
+          useChatStore.getState().mergeMessages(ctx.convId, msgs);
+        } else {
+          setMessages(ctx.convId, msgs);
+        }
       })
       .catch(() => {})
       .finally(() => !cancelled && setLoadingHistory(false));

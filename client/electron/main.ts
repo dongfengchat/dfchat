@@ -1,8 +1,9 @@
-import { app, BrowserWindow, ipcMain, Menu, Notification, shell, Tray, nativeImage } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell, Tray, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import https from 'node:https';
+import * as archive from './archive.js';
 
 // === Crash / error logging ===========================================
 // Write any uncaught error from main or renderer into a daily log file
@@ -179,6 +180,73 @@ function setupIpc() {
       notes: m.notes,
     };
   });
+
+  // === Encrypted local archive IPC =================================
+  // All writes are fire-and-forget from the renderer's perspective —
+  // the renderer keeps its in-memory store as the read-source of
+  // truth and the archive is a write-through cache. Errors get
+  // logged via diag instead of bubbling up, because a write
+  // failure shouldn't block the user from chatting.
+  ipcMain.handle('archive:append', (_e, msg: archive.ArchivedMessage) => {
+    try { archive.appendMessage(msg); }
+    catch (err) { logCrash('archive:append', err); }
+  });
+  ipcMain.handle('archive:markRecalled', (_e, messageId: string) => {
+    try { archive.markRecalled(messageId); }
+    catch (err) { logCrash('archive:markRecalled', err); }
+  });
+  ipcMain.handle('archive:remove', (_e, messageId: string) => {
+    try { archive.remove(messageId); }
+    catch (err) { logCrash('archive:remove', err); }
+  });
+  ipcMain.handle('archive:queryByConv', (_e, p: { convId: string; limit: number; beforeSeq?: number }) => {
+    try { return archive.queryByConv(p.convId, p.limit, p.beforeSeq); }
+    catch (err) { logCrash('archive:queryByConv', err); return []; }
+  });
+  ipcMain.handle('archive:maxSeq', (_e, convId: string) => {
+    try { return archive.maxSeq(convId); }
+    catch (err) { logCrash('archive:maxSeq', err); return 0; }
+  });
+  ipcMain.handle('archive:stats', () => {
+    try { return archive.stats(); }
+    catch (err) { logCrash('archive:stats', err); return { rows: 0, earliestCreatedAt: null, latestCreatedAt: null, dbBytes: 0 }; }
+  });
+  // Export prompts the user for a save location and writes a JSON
+  // dump of every archived message. The exported file is plaintext
+  // by design — the whole point is portability.
+  ipcMain.handle('archive:export', async (): Promise<{ ok: boolean; count?: number; path?: string; err?: string }> => {
+    if (!mainWindow) return { ok: false, err: 'no window' };
+    const stamp = new Date().toISOString().slice(0, 10);
+    const res = await dialog.showSaveDialog(mainWindow, {
+      title: '导出聊天记录',
+      defaultPath: `dfchat-archive-${stamp}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (res.canceled || !res.filePath) return { ok: false };
+    try {
+      const count = archive.exportAll(res.filePath);
+      return { ok: true, count, path: res.filePath };
+    } catch (err) {
+      logCrash('archive:export', err);
+      return { ok: false, err: String(err) };
+    }
+  });
+  ipcMain.handle('archive:import', async (): Promise<{ ok: boolean; count?: number; err?: string }> => {
+    if (!mainWindow) return { ok: false, err: 'no window' };
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: '导入聊天记录',
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+      properties: ['openFile'],
+    });
+    if (res.canceled || !res.filePaths[0]) return { ok: false };
+    try {
+      const count = archive.importMessages(res.filePaths[0]);
+      return { ok: true, count };
+    } catch (err) {
+      logCrash('archive:import', err);
+      return { ok: false, err: String(err) };
+    }
+  });
 }
 
 function redDotPngBuffer(): Buffer {
@@ -277,6 +345,13 @@ function setupAutoUpdater() {
 }
 
 app.whenReady().then(() => {
+  // Open the encrypted local archive first — renderer code expects
+  // window.dfchatArchive to be ready by the time it boots.
+  try {
+    archive.open();
+  } catch (err) {
+    logCrash('archive:open', err);
+  }
   setupIpc();
   setupTray();
   showOrCreateWindow();
@@ -284,9 +359,15 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  try { archive.close(); } catch { /* ignore */ }
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('activate', () => {
   showOrCreateWindow();
+});
+
+app.on('before-quit', () => {
+  // Final flush + zero the in-memory key. archive.close is idempotent.
+  try { archive.close(); } catch { /* ignore */ }
 });

@@ -49,6 +49,50 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openLogsFolder: () => ipcRenderer.invoke('diag:openLogs') as Promise<void>,
 });
 
+// Encrypted local message archive. Lives in the main process; this
+// surface exposes the minimal CRUD the renderer needs. All content is
+// AES-256-GCM encrypted at rest, key wrapped via OS keychain (Electron
+// safeStorage). See electron/archive.ts for the contract.
+interface ArchivedMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  type: string;
+  content: unknown;
+  seq: number;
+  mentions?: string[];
+  replyTo?: string;
+  isRecalled: boolean;
+  editedAt?: string;
+  editCount?: number;
+  createdAt: string;
+}
+contextBridge.exposeInMainWorld('dfchatArchive', {
+  // Write-through path used by the chat store on every chat.recv /
+  // chat.edit / send-response.
+  append: (msg: ArchivedMessage) => ipcRenderer.invoke('archive:append', msg) as Promise<void>,
+  markRecalled: (messageId: string) => ipcRenderer.invoke('archive:markRecalled', messageId) as Promise<void>,
+  remove: (messageId: string) => ipcRenderer.invoke('archive:remove', messageId) as Promise<void>,
+  // Read path used on app start to hydrate active conversations and
+  // when the user scrolls back beyond the in-memory cache.
+  queryByConv: (convId: string, limit: number, beforeSeq?: number) =>
+    ipcRenderer.invoke('archive:queryByConv', { convId, limit, beforeSeq }) as Promise<ArchivedMessage[]>,
+  // Sync helper: the renderer asks the server for everything newer
+  // than this seq, instead of refetching from zero.
+  maxSeq: (convId: string) => ipcRenderer.invoke('archive:maxSeq', convId) as Promise<number>,
+  // Settings → 本地归档 stats panel.
+  stats: () => ipcRenderer.invoke('archive:stats') as Promise<{
+    rows: number;
+    earliestCreatedAt: string | null;
+    latestCreatedAt: string | null;
+    dbBytes: number;
+  }>,
+  // Export / import buttons. Both open a native dialog and return
+  // { ok, count?, path?, err? }; the renderer just toasts the result.
+  export: () => ipcRenderer.invoke('archive:export') as Promise<{ ok: boolean; count?: number; path?: string; err?: string }>,
+  import: () => ipcRenderer.invoke('archive:import') as Promise<{ ok: boolean; count?: number; err?: string }>,
+});
+
 // Hook renderer-side unhandled errors so they get persisted automatically.
 window.addEventListener('error', (e) => {
   const err = e.error as Error | undefined;

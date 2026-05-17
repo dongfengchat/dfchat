@@ -5,6 +5,8 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  Database,
+  Download,
   Info,
   KeyRound,
   Loader2,
@@ -13,8 +15,10 @@ import {
   Monitor,
   Pencil,
   Save,
+  ShieldCheck,
   Smartphone,
   Trash2,
+  Upload,
   UserCircle,
   X,
   XCircle,
@@ -40,7 +44,7 @@ import Avatar from '@/components/ui/Avatar';
 import TitleBar from '@/components/TitleBar';
 import { toast } from '@/components/ui/Toast';
 
-type Tab = 'profile' | 'security' | 'devices' | 'about';
+type Tab = 'profile' | 'security' | 'devices' | 'archive' | 'about';
 
 function relative(iso?: string): string {
   if (!iso) return '从未使用';
@@ -83,6 +87,7 @@ export default function Settings() {
           <TabButton active={tab === 'profile'} onClick={() => setTab('profile')} icon={<UserCircle size={16} />} label="个人资料" />
           <TabButton active={tab === 'security'} onClick={() => setTab('security')} icon={<KeyRound size={16} />} label="账号安全" />
           <TabButton active={tab === 'devices'} onClick={() => setTab('devices')} icon={<Monitor size={16} />} label="登录设备" />
+          <TabButton active={tab === 'archive'} onClick={() => setTab('archive')} icon={<Database size={16} />} label="本地归档" />
           <TabButton active={tab === 'about'} onClick={() => setTab('about')} icon={<Info size={16} />} label="关于" />
         </nav>
 
@@ -95,6 +100,7 @@ export default function Settings() {
           )}
           {tab === 'security' && <SecurityTab />}
           {tab === 'devices' && <DevicesTab />}
+          {tab === 'archive' && <ArchiveTab />}
           {tab === 'about' && <AboutTab />}
         </main>
       </div>
@@ -740,6 +746,156 @@ function DevicesTab() {
             </button>
           </div>
         ))}
+      </div>
+    </section>
+  );
+}
+
+// ArchiveTab — local encrypted message archive panel.
+//
+// Surface area:
+//   - Stats: row count, oldest message date, DB file size on disk
+//   - Privacy explanation (which the user explicitly asked for)
+//   - "Export all" button (writes plaintext JSON to a user-chosen path)
+//   - "Import from previous device" button (merges a prior export)
+//
+// Only renders meaningfully when running inside Electron — in the
+// browser-mode dev build, window.dfchatArchive is undefined, so we
+// show a placeholder explaining the desktop client is the archive
+// host.
+function ArchiveTab() {
+  const archive = (typeof window !== 'undefined' && window.dfchatArchive) || undefined;
+  const [stats, setStats] = useState<{
+    rows: number;
+    earliestCreatedAt: string | null;
+    latestCreatedAt: string | null;
+    dbBytes: number;
+  } | null>(null);
+  const [busy, setBusy] = useState<'export' | 'import' | null>(null);
+
+  useEffect(() => {
+    if (!archive) return;
+    let cancelled = false;
+    archive.stats().then((s) => { if (!cancelled) setStats(s); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [archive]);
+
+  async function refreshStats() {
+    if (!archive) return;
+    try { setStats(await archive.stats()); } catch { /* ignore */ }
+  }
+
+  async function doExport() {
+    if (!archive) return;
+    setBusy('export');
+    try {
+      const r = await archive.export();
+      if (r.ok) toast(`已导出 ${r.count} 条到 ${r.path}`, 'success');
+    } catch (e: any) {
+      toast(e?.message ?? '导出失败', 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function doImport() {
+    if (!archive) return;
+    if (!confirm('导入会把选定文件里的消息合并进当前归档（按消息 id 去重）。继续？')) return;
+    setBusy('import');
+    try {
+      const r = await archive.import();
+      if (r.ok) {
+        toast(`已导入 ${r.count} 条`, 'success');
+        await refreshStats();
+      }
+    } catch (e: any) {
+      toast(e?.message ?? '导入失败', 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!archive) {
+    return (
+      <section className="card p-6 space-y-3 anim-fade">
+        <h2 className="text-base font-semibold flex items-center gap-2">
+          <Database size={16} /> 本地归档
+        </h2>
+        <p className="text-sm text-ink-3">
+          浏览器环境下没有本地归档。请使用桌面客户端，所有聊天记录会加密存储在本地数据库里。
+        </p>
+      </section>
+    );
+  }
+
+  const sizeMB = stats ? (stats.dbBytes / 1024 / 1024).toFixed(1) : '—';
+
+  return (
+    <section className="card p-6 space-y-5 anim-fade">
+      <div>
+        <h2 className="text-base font-semibold flex items-center gap-2">
+          <Database size={16} /> 本地归档
+        </h2>
+        <p className="text-xs text-ink-3 mt-1">
+          聊天记录的主力存储在<strong>这台电脑</strong>上 · 服务端只保留最近 30 天 · 30 天后服务端不能改你这里的副本
+        </p>
+      </div>
+
+      {/* Privacy / threat-model explanation. The user explicitly asked
+          for "protect against theft" so call it out plainly. */}
+      <div className="rounded-lg border border-bg-5/40 bg-bg-2 p-3 text-xs text-ink-3 space-y-1.5">
+        <div className="flex items-center gap-1.5 text-ink-2 font-medium">
+          <ShieldCheck size={14} className="text-accent-green" /> 加密说明
+        </div>
+        <div>
+          • 每条消息的正文都用 AES-256-GCM 加密后才写入磁盘
+        </div>
+        <div>
+          • 加密密钥由系统的钥匙串保管（macOS Keychain / Windows DPAPI / Linux libsecret），不在数据库文件里
+        </div>
+        <div>
+          • 仅靠拷走本地 db 文件无法读出内容 — 攻击者还需要登录这台电脑的系统账号
+        </div>
+        <div>
+          • 服务器上 30 天后的消息已经清空，只剩这里的副本
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        <div className="rounded-lg bg-bg-2 p-3">
+          <div className="text-[11px] text-ink-4">消息条数</div>
+          <div className="text-lg font-semibold mt-1">{stats?.rows ?? '—'}</div>
+        </div>
+        <div className="rounded-lg bg-bg-2 p-3">
+          <div className="text-[11px] text-ink-4">最早消息</div>
+          <div className="text-sm mt-1">
+            {stats?.earliestCreatedAt
+              ? new Date(stats.earliestCreatedAt).toLocaleDateString()
+              : '—'}
+          </div>
+        </div>
+        <div className="rounded-lg bg-bg-2 p-3">
+          <div className="text-[11px] text-ink-4">数据库大小</div>
+          <div className="text-sm mt-1">{sizeMB} MB</div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button onClick={doExport} disabled={busy !== null} className="btn-secondary">
+          {busy === 'export' ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+          导出全部聊天记录
+        </button>
+        <button onClick={doImport} disabled={busy !== null} className="btn-secondary">
+          {busy === 'import' ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+          从旧设备导入
+        </button>
+        <button onClick={refreshStats} disabled={busy !== null} className="btn-ghost">
+          刷新统计
+        </button>
+      </div>
+
+      <div className="text-[11px] text-ink-4 leading-relaxed">
+        提示：导出的 JSON 文件是<strong>明文</strong>（方便迁移和审计），请保存在加密磁盘 / 加密压缩包里 · 换设备时把它拷到新机器再用「从旧设备导入」即可继承全部历史
       </div>
     </section>
   );
