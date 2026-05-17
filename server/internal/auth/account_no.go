@@ -12,20 +12,22 @@ import (
 // be assigned by random draw. These get is_locked=true in the pool and
 // stay in reserve for admin grants / premium sale.
 //
-// We deliberately keep this set small in the early stages — only the
-// truly extraordinary patterns. Numbers with merely "nice" patterns
-// (4 consecutive same digits, trailing 000) stay in the random pool so
-// early users have a real chance of drawing something they'll love.
-// We can tighten later by running a sweep that locks unsold ones.
+// Rule of thumb: "would a Chinese user instantly recognise this as a
+// 靓号 worth bragging about?" Mathematical curiosities (palindromes
+// like 101101) get the same eye-roll as a random number — they're
+// out. We only lock patterns that are visually striking at a glance.
 //
 // Locked patterns:
 //   1. All-same digit:     111111, 222222, …            (1 per 10k)
 //   2. Strict ascending:   123456, 234567, 345678, 456789
-//   3. Strict descending:  987654, 876543, …            (none in 1xxxxx)
-//   4. Full palindrome:    100001, 101101, 122221, …    (~100 per 1M)
-//   5. 5+ consecutive same digits anywhere               (~20 per 10k)
+//   3. Strict descending:  987654, 876543, …
+//   4. 5+ consecutive same digits anywhere               (~10-20 per 10k)
 //
-// Combined this is ~30-50 numbers per 10k-segment — under 0.5%.
+// Combined this is single-digits up to ~20 numbers per 10k-segment —
+// under 0.2%. Everything else (including "merely nice" patterns like
+// 4 consecutive same digits or trailing 000) stays in the random pool
+// so early users have a real chance of drawing something they'll love.
+// We can tighten later by running a sweep that locks unsold ones.
 func isLockedPattern(n int64) bool {
 	s := strconv.FormatInt(n, 10)
 	if len(s) < 6 {
@@ -34,7 +36,6 @@ func isLockedPattern(n int64) bool {
 	return allSameDigit(s) ||
 		isStrictAscending(s) ||
 		isStrictDescending(s) ||
-		isPalindrome(s) ||
 		hasConsecutiveSame(s, 5)
 }
 
@@ -72,16 +73,6 @@ func isStrictDescending(s string) bool {
 	return true
 }
 
-// Palindrome: reads the same forward and backward.
-// Catches 123321, 100001, 122221, 109901, …
-func isPalindrome(s string) bool {
-	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
-		if s[i] != s[j] {
-			return false
-		}
-	}
-	return true
-}
 
 // hasConsecutiveSame reports whether s contains a run of `minRun` or
 // more identical digits anywhere.
