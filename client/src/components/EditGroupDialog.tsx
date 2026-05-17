@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
-import { Loader2, Upload, Trash2, Megaphone } from 'lucide-react';
-import { updateGroup, uploadBlob } from '@/api/client';
+import { AlertTriangle, Copy, Globe, Loader2, Lock, Megaphone, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { deleteGroup, rotateGroupInviteCode, updateGroup, uploadBlob } from '@/api/client';
 import Modal from './ui/Modal';
 import { toast } from './ui/Toast';
 import type { Group } from '@/types';
@@ -10,17 +10,26 @@ interface Props {
   group: Group;
   onClose: () => void;
   onSaved: (g: Group) => void;
+  /** Owner-only callback fired after a successful dissolve; the parent
+   *  should clear the active conversation + drop the group from any
+   *  local store. If absent, dissolve is hidden. */
+  onDissolved?: (g: Group) => void;
   /** Members can only edit announcement; admins can edit description+announcement; only owner can edit name/icon. */
   myRole: number;
 }
 
-export default function EditGroupDialog({ open, group, onClose, onSaved, myRole }: Props) {
+export default function EditGroupDialog({ open, group, onClose, onSaved, onDissolved, myRole }: Props) {
   const [name, setName] = useState(group.name);
   const [description, setDescription] = useState(group.description ?? '');
   const [announcement, setAnnouncement] = useState(group.announcement ?? '');
   const [iconUrl, setIconUrl] = useState(group.iconUrl ?? '');
+  const [isPublic, setIsPublic] = useState(!!group.isPublic);
+  const [inviteCode, setInviteCode] = useState(group.inviteCode);
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  const [confirmDissolve, setConfirmDissolve] = useState(false);
+  const [dissolving, setDissolving] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const canEditAll = myRole >= 2;
@@ -58,6 +67,7 @@ export default function EditGroupDialog({ open, group, onClose, onSaved, myRole 
       if (canEditAll) {
         patch.name = name.trim() || undefined;
         patch.iconUrl = iconUrl;
+        if (isPublic !== !!group.isPublic) patch.isPublic = isPublic;
       }
       const next = await updateGroup(group.id, patch);
       toast('已保存', 'success');
@@ -66,6 +76,43 @@ export default function EditGroupDialog({ open, group, onClose, onSaved, myRole 
       toast(e.message ?? '保存失败', 'error');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function rotate() {
+    if (!confirm('重新生成邀请码后，原邀请码立即失效。已经分享出去的旧链接将无法用于加入。\n\n继续？')) return;
+    setRotating(true);
+    try {
+      const code = await rotateGroupInviteCode(group.id);
+      setInviteCode(code);
+      onSaved({ ...group, inviteCode: code });
+      toast('邀请码已更新', 'success');
+    } catch (e: any) {
+      toast(e.message ?? '操作失败', 'error');
+    } finally {
+      setRotating(false);
+    }
+  }
+
+  async function copyInvite() {
+    try {
+      await navigator.clipboard.writeText(inviteCode);
+      toast('邀请码已复制', 'success');
+    } catch {
+      toast('复制失败，请手动选择', 'warn');
+    }
+  }
+
+  async function dissolve() {
+    setDissolving(true);
+    try {
+      await deleteGroup(group.id);
+      toast('群组已解散', 'success');
+      onDissolved?.(group);
+      onClose();
+    } catch (e: any) {
+      toast(e.message ?? '解散失败', 'error');
+      setDissolving(false);
     }
   }
 
@@ -139,12 +186,105 @@ export default function EditGroupDialog({ open, group, onClose, onSaved, myRole 
           </div>
         </div>
 
+        {/* Invite-code panel — visible to anyone who can see the group
+            settings; rotate is admin/owner only. Copy is universal. */}
+        <div>
+          <label className="text-xs text-ink-3">邀请码</label>
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              className="input flex-1 font-mono tracking-wide"
+              value={inviteCode}
+              readOnly
+              onFocus={(e) => e.target.select()}
+            />
+            <button onClick={copyInvite} className="btn-secondary text-xs" title="复制邀请码">
+              <Copy size={14} /> 复制
+            </button>
+            {canEditAdmin && (
+              <button onClick={rotate} disabled={rotating} className="btn-secondary text-xs" title="重新生成（旧码立即失效）">
+                {rotating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} 换一个
+              </button>
+            )}
+          </div>
+          <div className="text-[11px] text-ink-4 mt-1">
+            分享这个码给好友，他们在「加入群组」里输入即可加入。
+            {canEditAdmin && '换码后所有已分享出去的旧链接失效。'}
+          </div>
+        </div>
+
+        {canEditAll && (
+          <div>
+            <label className="text-xs text-ink-3">公开度</label>
+            <div className="mt-1 flex flex-col gap-1.5">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  className="mt-1"
+                  checked={!isPublic}
+                  onChange={() => setIsPublic(false)}
+                />
+                <span className="flex flex-col">
+                  <span className="text-sm inline-flex items-center gap-1"><Lock size={12} /> 仅邀请加入</span>
+                  <span className="text-[11px] text-ink-4">只有拿到邀请码的人才能加入。</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  className="mt-1"
+                  checked={isPublic}
+                  onChange={() => setIsPublic(true)}
+                />
+                <span className="flex flex-col">
+                  <span className="text-sm inline-flex items-center gap-1"><Globe size={12} /> 公开可发现</span>
+                  <span className="text-[11px] text-ink-4">未来可在「探索群组」里被人搜到。</span>
+                </span>
+              </label>
+            </div>
+          </div>
+        )}
+
         <div className="flex gap-2 justify-end pt-2 border-t border-bg-5/40">
           <button onClick={onClose} className="btn-secondary">取消</button>
           <button onClick={save} disabled={saving} className="btn-primary">
             {saving ? <Loader2 size={14} className="animate-spin" /> : null} 保存
           </button>
         </div>
+
+        {/* Danger zone — owner-only manual dissolve. Two-step confirm
+            so a misclick doesn't nuke a chatty group full of history. */}
+        {canEditAll && onDissolved && (
+          <div className="mt-4 rounded-lg border border-accent-red/40 bg-accent-red/5 p-3">
+            <div className="text-xs text-accent-red flex items-center gap-1 font-medium">
+              <AlertTriangle size={12} /> 危险操作
+            </div>
+            <div className="text-[11px] text-ink-3 mt-1">
+              解散群组后，所有成员立刻失去访问；历史消息会保留在数据库以便审计，但任何人都看不到。
+              操作不可撤销。
+            </div>
+            {!confirmDissolve ? (
+              <button
+                onClick={() => setConfirmDissolve(true)}
+                className="btn-secondary text-xs mt-2 text-accent-red hover:bg-accent-red/10"
+              >
+                <Trash2 size={12} /> 解散群组…
+              </button>
+            ) : (
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={dissolve}
+                  disabled={dissolving}
+                  className="btn-primary text-xs bg-accent-red hover:bg-accent-red/90 border-accent-red"
+                >
+                  {dissolving ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} 确认解散
+                </button>
+                <button onClick={() => setConfirmDissolve(false)} className="btn-ghost text-xs">
+                  取消
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </Modal>
   );

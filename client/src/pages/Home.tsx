@@ -171,6 +171,15 @@ export default function Home() {
         replaceMessage(msg);
         return;
       }
+      // chat.edit fires when the author rewrites a text message within
+      // the 5-min edit window. Same shape as chat.recv — the store's
+      // replaceMessage swaps the existing row in place. We don't
+      // surface notifications for edits (would be too noisy).
+      if (ev.type === 'chat.edit') {
+        const msg = ev.payload as ChatMessage;
+        replaceMessage(msg);
+        return;
+      }
       if (ev.type === 'chat.reaction') {
         const p = ev.payload as { conversationId: string; messageId: string; reactions: ReactionCountType[] };
         applyReactionUpdate(p.conversationId, p.messageId, p.reactions ?? []);

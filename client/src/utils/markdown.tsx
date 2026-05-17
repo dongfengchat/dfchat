@@ -68,27 +68,68 @@ function renderInlineWithMentions(text: string, mentionLookup: (handle: string) 
   });
 }
 
+// everyoneRe matches the conventional broadcast triggers a sender types
+// in their message body. We render any of these as a single highlighted
+// "@全体成员" pill regardless of which spelling was used. The actual
+// notify-everyone effect is driven server-side off mentions:["0"], not
+// off this regex — the client is just being friendly with rendering.
+const everyoneRe = /@(?:everyone|all|所有人|全体|全体成员)\b/gi;
+
 function renderMentions(text: string, isKnown: (handle: string) => boolean): React.ReactNode {
   const parts: React.ReactNode[] = [];
-  const re = /@([A-Za-z0-9_]+)/g;
-  let last = 0;
+  // First pass: pick out @everyone-style triggers anywhere in the
+  // text. We need to interleave them with the per-user @mention
+  // matches below, so we run a combined left-to-right scan instead
+  // of two passes.
+  type Hit = { start: number; end: number; node: React.ReactNode };
+  const hits: Hit[] = [];
   let m: RegExpExecArray | null;
+
   let k = 0;
-  while ((m = re.exec(text))) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    const handle = m[1];
-    if (isKnown(handle)) {
-      parts.push(
-        <span key={`m-${k++}`} className="text-brand-300 bg-brand-500/15 rounded px-1 font-medium">
-          @{handle}
-        </span>,
-      );
-    } else {
-      parts.push(`@${handle}`);
-    }
-    last = re.lastIndex;
+  // @everyone-style first — they take priority over the generic
+  // handle regex (which would otherwise match "@all" as handle "all").
+  everyoneRe.lastIndex = 0;
+  while ((m = everyoneRe.exec(text))) {
+    hits.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      node: (
+        <span
+          key={`me-${k++}`}
+          className="text-accent-amber bg-accent-amber/15 rounded px-1 font-medium"
+          title="提及所有人"
+        >
+          @全体成员
+        </span>
+      ),
+    });
   }
-  if (last < text.length) parts.push(text.slice(last));
+
+  const handleRe = /@([A-Za-z0-9_]+)/g;
+  while ((m = handleRe.exec(text))) {
+    // Skip if this overlaps with an @everyone hit already captured.
+    const start = m.index;
+    const end = m.index + m[0].length;
+    if (hits.some((h) => start < h.end && end > h.start)) continue;
+    const handle = m[1];
+    const node = isKnown(handle) ? (
+      <span key={`m-${k++}`} className="text-brand-300 bg-brand-500/15 rounded px-1 font-medium">
+        @{handle}
+      </span>
+    ) : (
+      <React.Fragment key={`mu-${k++}`}>{`@${handle}`}</React.Fragment>
+    );
+    hits.push({ start, end, node });
+  }
+
+  hits.sort((a, b) => a.start - b.start);
+  let cursor = 0;
+  for (const h of hits) {
+    if (h.start > cursor) parts.push(text.slice(cursor, h.start));
+    parts.push(h.node);
+    cursor = h.end;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
   return parts;
 }
 

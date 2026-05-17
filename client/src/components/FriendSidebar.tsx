@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
   Hash,
   Inbox,
   LogOut,
+  MoreHorizontal,
+  Pencil,
   Plus,
   RadioTower,
   Search,
   Settings,
   ShieldCheck,
+  Trash2,
   UserPlus,
   Users,
 } from 'lucide-react';
@@ -19,12 +22,14 @@ import {
   channelConvId,
   createChannel,
   createGroup,
+  deleteChannel,
   joinGroup,
   listChannels,
   listFriends,
   listFriendRequests,
   listGroups,
   privateConvId,
+  renameChannel,
 } from '@/api/client';
 import { useChatStore, type ChatTarget } from '@/store/chatStore';
 import { useUserStore } from '@/store/userStore';
@@ -330,18 +335,34 @@ export default function FriendSidebar({
                       const t: ChatTarget = { kind: 'channel', groupId: g.id, channelId: c.id };
                       const u = unread(channelConvId(c.id));
                       const active = targetEquals(activeTarget, t);
+                      const canManage = user?.id === g.ownerId; // also true for admins; we don't have role here, fall back to owner. Admins can use the right-click via the group page.
                       return (
-                        <button
+                        <ChannelRow
                           key={c.id}
-                          onClick={() => setActiveTarget(t)}
-                          className={`w-full py-1.5 pl-2 pr-2 flex items-center gap-2 text-sm text-left rounded transition-colors ${
-                            active ? 'bg-brand-500/15 text-ink-1' : 'text-ink-3 hover:bg-bg-3 hover:text-ink-1'
-                          }`}
-                        >
-                          <Hash size={14} className="text-ink-4" />
-                          <span className="truncate flex-1">{c.name}</span>
-                          <UnreadBadge count={u} />
-                        </button>
+                          name={c.name}
+                          channelId={c.id}
+                          groupId={g.id}
+                          unread={u}
+                          active={active}
+                          canManage={canManage}
+                          isOnlyChannel={chs.length === 1}
+                          onSelect={() => setActiveTarget(t)}
+                          onRenamed={async () => {
+                            const fresh = await listChannels(g.id);
+                            setChannels(g.id, fresh);
+                          }}
+                          onDeleted={async () => {
+                            // If the user was on this channel, fall back to
+                            // the group's first remaining channel.
+                            const fresh = await listChannels(g.id);
+                            setChannels(g.id, fresh);
+                            if (active && fresh.length > 0) {
+                              setActiveTarget({ kind: 'channel', groupId: g.id, channelId: fresh[0].id });
+                            } else if (active) {
+                              setActiveTarget(null);
+                            }
+                          }}
+                        />
                       );
                     })}
                     {user?.id === g.ownerId && (
@@ -402,6 +423,149 @@ export default function FriendSidebar({
         }}
       />
     </aside>
+  );
+}
+
+// ChannelRow is one entry under an expanded group in the sidebar. It
+// supports the basic "click to open" flow plus, for owner/admin, an
+// inline rename (double-click or via the ⋯ menu) and a hard delete.
+// We keep this component local rather than in /ui because the unread
+// + active styling is sidebar-specific.
+function ChannelRow({
+  name,
+  channelId,
+  unread,
+  active,
+  canManage,
+  isOnlyChannel,
+  onSelect,
+  onRenamed,
+  onDeleted,
+}: {
+  name: string;
+  channelId: string;
+  groupId: string;
+  unread: number;
+  active: boolean;
+  canManage: boolean;
+  isOnlyChannel: boolean;
+  onSelect: () => void;
+  onRenamed: () => Promise<void> | void;
+  onDeleted: () => Promise<void> | void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const [busy, setBusy] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { setDraft(name); }, [name]);
+  useEffect(() => {
+    if (editing) inputRef.current?.select();
+  }, [editing]);
+
+  async function saveRename() {
+    const next = draft.trim();
+    if (!next || next === name) {
+      setEditing(false);
+      return;
+    }
+    setBusy(true);
+    try {
+      await renameChannel(channelId, next);
+      await onRenamed();
+      toast('频道已重命名', 'success');
+      setEditing(false);
+    } catch (err: any) {
+      toast(err.message ?? '重命名失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doDelete() {
+    if (isOnlyChannel) {
+      toast('这是群里最后一个频道，无法删除', 'warn');
+      return;
+    }
+    if (!confirm(`确定删除频道 #${name}？此操作不可撤销，频道内的消息将无法访问。`)) return;
+    setBusy(true);
+    try {
+      await deleteChannel(channelId);
+      toast('频道已删除', 'success');
+      await onDeleted();
+    } catch (err: any) {
+      toast(err.message ?? '删除失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className={`w-full py-1.5 pl-2 pr-2 flex items-center gap-2 rounded ${active ? 'bg-brand-500/15' : 'bg-bg-3'}`}>
+        <Hash size={14} className="text-ink-4 shrink-0" />
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { e.preventDefault(); void saveRename(); }
+            else if (e.key === 'Escape') { setEditing(false); setDraft(name); }
+          }}
+          disabled={busy}
+          maxLength={64}
+          className="bg-transparent outline-none text-sm flex-1 min-w-0 text-ink-1 border-b border-brand-500/60 focus:border-brand-500"
+          placeholder="频道名"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative group">
+      <button
+        onClick={onSelect}
+        onDoubleClick={() => canManage && setEditing(true)}
+        className={`w-full py-1.5 pl-2 pr-2 flex items-center gap-2 text-sm text-left rounded transition-colors ${
+          active ? 'bg-brand-500/15 text-ink-1' : 'text-ink-3 hover:bg-bg-3 hover:text-ink-1'
+        }`}
+      >
+        <Hash size={14} className="text-ink-4 shrink-0" />
+        <span className="truncate flex-1">{name}</span>
+        <UnreadBadge count={unread} />
+      </button>
+      {canManage && (
+        <button
+          onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
+          className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity btn-icon w-6 h-6 bg-bg-3 hover:bg-bg-4 border border-bg-5/40"
+          title="频道选项"
+          aria-label="频道选项"
+        >
+          <MoreHorizontal size={12} />
+        </button>
+      )}
+      {menuOpen && canManage && (
+        <>
+          {/* Click-outside backdrop */}
+          <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
+          <div className="absolute right-0 top-full mt-1 z-20 bg-bg-3 border border-bg-5/40 rounded-lg shadow-pop overflow-hidden min-w-[120px]">
+            <button
+              onClick={() => { setMenuOpen(false); setEditing(true); }}
+              className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-left hover:bg-bg-4"
+            >
+              <Pencil size={12} /> 重命名
+            </button>
+            <button
+              onClick={() => { setMenuOpen(false); void doDelete(); }}
+              className="flex items-center gap-2 w-full px-3 py-1.5 text-sm text-left hover:bg-bg-4 text-accent-red"
+            >
+              <Trash2 size={12} /> 删除
+            </button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

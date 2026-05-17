@@ -34,6 +34,7 @@ import {
   markRead as apiMarkRead,
   pinMessage,
   privateConvId,
+  editMessage,
   recallMessage,
   removeReaction as apiRemoveReaction,
   sendChannelMessage,
@@ -159,6 +160,13 @@ function MessageBody({
 
 function withinRecallWindow(createdAt: string): boolean {
   return Date.now() - new Date(createdAt).getTime() < 2 * 60 * 1000;
+}
+
+// withinEditWindow mirrors the server-side EditWindowSeconds=300. The
+// menu hides the "编辑" item once the window passes so users don't
+// click into a sure-to-fail PATCH.
+function withinEditWindow(createdAt: string): boolean {
+  return Date.now() - new Date(createdAt).getTime() < 5 * 60 * 1000;
 }
 
 // Returns the id of the last own-message in the whole conversation. Used so
@@ -289,6 +297,11 @@ export default function ChatView() {
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
+  // Inline-edit state. `editingId` is the id of the message whose
+  // bubble has been swapped out for a small textarea; `editingDraft`
+  // is the local working text. Both clear on save / cancel / Esc.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingDraft, setEditingDraft] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [reactingFor, setReactingFor] = useState<string | null>(null);
   const [pinnedExpanded, setPinnedExpanded] = useState(false);
@@ -536,6 +549,42 @@ export default function ChatView() {
     }
   }
 
+  // handleStartEdit swaps the bubble out for an inline textarea
+  // populated with the current text. Closes any open right-click menu.
+  function handleStartEdit(msg: ChatMessage) {
+    setMenuFor(null);
+    const current = typeof msg.content?.text === 'string' ? msg.content.text : '';
+    setEditingId(msg.id);
+    setEditingDraft(current);
+  }
+
+  function handleCancelEdit() {
+    setEditingId(null);
+    setEditingDraft('');
+  }
+
+  async function handleSaveEdit(msg: ChatMessage) {
+    const trimmed = editingDraft.trim();
+    if (!trimmed) {
+      toast('内容不能为空', 'warn');
+      return;
+    }
+    // No-op if unchanged — saves a server round-trip and avoids
+    // bumping editCount on accidental Enter.
+    const original = typeof msg.content?.text === 'string' ? msg.content.text : '';
+    if (trimmed === original.trim()) {
+      handleCancelEdit();
+      return;
+    }
+    try {
+      const updated = await editMessage(msg.id, editingDraft);
+      replaceMessage(updated);
+      handleCancelEdit();
+    } catch (err: any) {
+      toast(err.message ?? '编辑失败', 'error');
+    }
+  }
+
   async function handleToggleReaction(msg: ChatMessage, emoji: string) {
     if (!me) return;
     const myId = Number(me.id);
@@ -777,13 +826,26 @@ export default function ChatView() {
               group={g}
               onClose={() => setEditGroupOpen(false)}
               onSaved={async (updated) => {
-                setEditGroupOpen(false);
-                // Refresh the group list so name/announcement updates show.
+                // Don't auto-close on every save — invite-rotate /
+                // privacy-toggle / iconUrl-upload all call onSaved and
+                // the user usually wants to keep the dialog open.
+                // We only close from the dedicated "保存" + "取消"
+                // buttons in the dialog (which both call onClose).
                 try {
                   const fresh = await listGroups();
                   setGroups(fresh);
-                  void updated; // updated is the same as what comes back in fresh
+                  void updated;
                 } catch { /* keep cached */ }
+              }}
+              onDissolved={async () => {
+                // Owner just dissolved — pop the user back to the
+                // group list, refresh local store, drop the active
+                // selection so we don't try to render a dead conv.
+                try {
+                  const fresh = await listGroups();
+                  setGroups(fresh);
+                } catch { /* keep cached */ }
+                setActiveTarget(null);
               }}
               myRole={myRole}
             />
@@ -902,6 +964,12 @@ export default function ChatView() {
                   onReply={(m) => setReplyingTo(m)}
                   onPin={handlePin}
                   onToggleReaction={handleToggleReaction}
+                  editingId={editingId}
+                  editingDraft={editingDraft}
+                  onStartEdit={handleStartEdit}
+                  onChangeEditingDraft={setEditingDraft}
+                  onSaveEdit={handleSaveEdit}
+                  onCancelEdit={handleCancelEdit}
                 />
               );
             })}
@@ -1084,6 +1152,12 @@ function MessageGroup({
   onReply,
   onPin,
   onToggleReaction,
+  editingId,
+  editingDraft,
+  onStartEdit,
+  onChangeEditingDraft,
+  onSaveEdit,
+  onCancelEdit,
 }: {
   groupMsgs: ChatMessage[];
   mine: boolean;
@@ -1103,6 +1177,12 @@ function MessageGroup({
   onReply: (m: ChatMessage) => void;
   onPin: (m: ChatMessage) => void;
   onToggleReaction: (m: ChatMessage, emoji: string) => void;
+  editingId: string | null;
+  editingDraft: string;
+  onStartEdit: (m: ChatMessage) => void;
+  onChangeEditingDraft: (s: string) => void;
+  onSaveEdit: (m: ChatMessage) => void;
+  onCancelEdit: () => void;
 }) {
   return (
     <div className={`flex gap-3 ${mine ? 'flex-row-reverse' : ''} px-1 py-1`}>
@@ -1116,9 +1196,15 @@ function MessageGroup({
         <div className={`flex flex-col gap-0.5 ${mine ? 'items-end' : 'items-start'} w-full`}>
           {groupMsgs.map((m, idx) => {
             const canRecall = mine && !m.isRecalled && withinRecallWindow(m.createdAt);
+            // canEdit mirrors the server-side rules: own text message,
+            // not recalled, within the 5-min edit window. Image/file
+            // messages aren't editable; only "text" gives meaningful
+            // rewrite semantics.
+            const canEdit = mine && !m.isRecalled && m.type === 'text' && withinEditWindow(m.createdAt);
             const t = new Date(m.createdAt);
             const showTime = idx === groupMsgs.length - 1;
             const parent = m.replyTo ? msgById.get(String(m.replyTo)) : undefined;
+            const isEditing = editingId === m.id;
             return (
               <div
                 key={m.id}
@@ -1137,19 +1223,43 @@ function MessageGroup({
                   }}
                 >
                   {m.replyTo && <ReplyQuote parent={parent} nameLookup={nameLookup} />}
-                  <MessageBody msg={m} nameLookup={nameLookup} />
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMenuFor(menuFor === m.id ? null : m.id);
-                    }}
-                    className={`absolute top-1/2 -translate-y-1/2 ${
-                      mine ? 'left-0 -translate-x-[calc(100%+6px)]' : 'right-0 translate-x-[calc(100%+6px)]'
-                    } opacity-0 group-hover:opacity-100 transition-opacity btn-icon w-7 h-7 bg-bg-3 hover:bg-bg-4 border border-bg-5/40`}
-                    title="更多"
-                  >
-                    <MoreHorizontal size={14} />
-                  </button>
+                  {isEditing ? (
+                    <EditMessageInline
+                      mine={mine}
+                      value={editingDraft}
+                      onChange={onChangeEditingDraft}
+                      onSave={() => onSaveEdit(m)}
+                      onCancel={onCancelEdit}
+                    />
+                  ) : (
+                    <>
+                      <MessageBody msg={m} nameLookup={nameLookup} />
+                      {/* "(已编辑)" badge after the body — small, muted, no extra
+                          layout. Only shows on actually-edited messages. */}
+                      {m.editedAt && !m.isRecalled && (
+                        <span
+                          className={`ml-1 text-[10px] align-middle ${mine ? 'text-white/60' : 'text-ink-3'}`}
+                          title={`编辑于 ${new Date(m.editedAt).toLocaleString()}${(m.editCount ?? 1) > 1 ? ` · 共编辑 ${m.editCount} 次` : ''}`}
+                        >
+                          (已编辑)
+                        </span>
+                      )}
+                    </>
+                  )}
+                  {!isEditing && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMenuFor(menuFor === m.id ? null : m.id);
+                      }}
+                      className={`absolute top-1/2 -translate-y-1/2 ${
+                        mine ? 'left-0 -translate-x-[calc(100%+6px)]' : 'right-0 translate-x-[calc(100%+6px)]'
+                      } opacity-0 group-hover:opacity-100 transition-opacity btn-icon w-7 h-7 bg-bg-3 hover:bg-bg-4 border border-bg-5/40`}
+                      title="更多"
+                    >
+                      <MoreHorizontal size={14} />
+                    </button>
+                  )}
                 </div>
                 {/* Reactions strip */}
                 {(m.reactions?.length ?? 0) > 0 && !m.isRecalled && (
@@ -1224,6 +1334,14 @@ function MessageGroup({
                         <PinIcon size={14} /> 置顶
                       </button>
                     )}
+                    {canEdit && (
+                      <button
+                        onClick={() => onStartEdit(m)}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-bg-4"
+                      >
+                        <Pencil size={14} /> 编辑
+                      </button>
+                    )}
                     {canRecall && (
                       <button
                         onClick={() => onRecall(m)}
@@ -1246,4 +1364,78 @@ function MessageGroup({
 // Wraps the EmojiPicker primitive so it can be used inline for reactions.
 function EmojiPickerInline({ onPick, onClose }: { onPick: (e: string) => void; onClose: () => void }) {
   return <EmojiPicker onPick={onPick} onClose={onClose} />;
+}
+
+// EditMessageInline replaces a message bubble's body with a small
+// auto-grown textarea + save/cancel buttons. ⌘/Ctrl+Enter saves, Esc
+// cancels, plain Enter inserts a newline (so you can fix multi-line
+// messages without losing structure). Auto-focused on mount.
+function EditMessageInline({
+  mine,
+  value,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  mine: boolean;
+  value: string;
+  onChange: (s: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const ta = ref.current;
+    if (!ta) return;
+    ta.focus();
+    // Place caret at the end so the user can keep typing where they
+    // last left off, not in the middle of the existing text.
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }, []);
+  // Auto-grow: clamp between 1 and ~8 visible lines based on scrollHeight.
+  useEffect(() => {
+    const ta = ref.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 220) + 'px';
+  }, [value]);
+
+  return (
+    <div className="min-w-[200px] max-w-full">
+      <textarea
+        ref={ref}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            onCancel();
+          } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            onSave();
+          }
+        }}
+        className={`w-full resize-none rounded-md px-2 py-1 text-sm leading-relaxed outline-none ring-1 ${
+          mine ? 'bg-white/15 text-white placeholder-white/60 ring-white/30' : 'bg-bg-2 text-ink-1 ring-bg-5/60'
+        } focus:ring-brand-500`}
+        rows={1}
+        placeholder="编辑消息内容…"
+      />
+      <div className={`mt-1 flex items-center gap-2 text-[11px] ${mine ? 'text-white/75' : 'text-ink-3'}`}>
+        <button
+          onClick={onSave}
+          className={`px-2 py-0.5 rounded ${mine ? 'bg-white/20 hover:bg-white/30 text-white' : 'bg-brand-500 hover:bg-brand-600 text-white'}`}
+        >
+          保存
+        </button>
+        <button
+          onClick={onCancel}
+          className={`px-2 py-0.5 rounded ${mine ? 'hover:bg-white/15' : 'hover:bg-bg-4'}`}
+        >
+          取消
+        </button>
+        <span className="ml-1 opacity-70">⌘/Ctrl+Enter 保存 · Esc 取消</span>
+      </div>
+    </div>
+  );
 }
