@@ -180,6 +180,16 @@ export default function Home() {
         replaceMessage(msg);
         return;
       }
+      // chat.delete fires when the author hard-deletes a message
+      // (server PATCH /messages/:id). Server's copy is gone for good.
+      // Phase 2 (local archive) will gate this event on the message's
+      // createdAt being within 30 days — for now we trust everything
+      // since we don't have a persistent archive yet.
+      if (ev.type === 'chat.delete') {
+        const p = ev.payload as { messageId: string; conversationId: string };
+        useChatStore.getState().removeMessage(p.conversationId, p.messageId);
+        return;
+      }
       if (ev.type === 'chat.reaction') {
         const p = ev.payload as { conversationId: string; messageId: string; reactions: ReactionCountType[] };
         applyReactionUpdate(p.conversationId, p.messageId, p.reactions ?? []);

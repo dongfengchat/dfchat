@@ -44,6 +44,7 @@ interface ChatState {
   mergeMessages: (convId: string, msgs: ChatMessage[]) => void;
   appendMessage: (msg: ChatMessage) => void;
   replaceMessage: (msg: ChatMessage) => void;
+  removeMessage: (convId: string, messageId: string) => void;
   applyReactionUpdate: (convId: string, messageId: string, reactions: ReactionCount[]) => void;
   setPins: (convId: string, pins: Pin[]) => void;
   addPin: (convId: string, pin: Pin) => void;
@@ -147,6 +148,22 @@ export const useChatStore = create<ChatState>((set) => ({
       next[idx] = msg;
       cacheMessages(msg.conversationId, next);
       return { messagesByConv: { ...s.messagesByConv, [msg.conversationId]: next } };
+    }),
+
+  // removeMessage drops a message from the in-memory view + the
+  // localStorage cache. Used when the server hard-deletes a message
+  // (chat.delete WS event) or when the author chose "delete" in the
+  // context menu. Phase 2 will introduce a separate persistent
+  // archive that is NOT affected by this — the local copy survives
+  // even after the server's view of the message is gone.
+  removeMessage: (convId, messageId) =>
+    set((s) => {
+      const existing = s.messagesByConv[convId];
+      if (!existing) return s;
+      const next = existing.filter((m) => m.id !== messageId);
+      if (next.length === existing.length) return s;
+      cacheMessages(convId, next);
+      return { messagesByConv: { ...s.messagesByConv, [convId]: next } };
     }),
 
   applyReactionUpdate: (convId, messageId, reactions) =>

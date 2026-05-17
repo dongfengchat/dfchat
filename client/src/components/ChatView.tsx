@@ -16,6 +16,7 @@ import {
   ShieldOff,
   Smile,
   SmilePlus,
+  Trash2,
   Users,
   Video,
   X,
@@ -34,6 +35,7 @@ import {
   markRead as apiMarkRead,
   pinMessage,
   privateConvId,
+  deleteMessage,
   editMessage,
   recallMessage,
   removeReaction as apiRemoveReaction,
@@ -549,6 +551,24 @@ export default function ChatView() {
     }
   }
 
+  // handleDelete permanently removes the message from the server. Note
+  // this is different from recall — recall keeps a redacted "撤回"
+  // placeholder; delete drops the row entirely (so reply quotes need
+  // the _replyToSnapshot we embed at send time). Local archive (Phase 2)
+  // is unaffected by design — that's the whole point of the 30-day
+  // server authority horizon.
+  async function handleDelete(msg: ChatMessage) {
+    setMenuFor(null);
+    if (!confirm('删除这条消息？\n\n此操作会从服务端永久移除该消息（30 天内有效）。其他设备上的本地副本可能仍保留——这是"服务端 30 天保留"的设计。')) return;
+    try {
+      await deleteMessage(msg.id);
+      useChatStore.getState().removeMessage(msg.conversationId, msg.id);
+      toast('已删除', 'success');
+    } catch (err: any) {
+      toast(err.message ?? '删除失败', 'error');
+    }
+  }
+
   // handleStartEdit swaps the bubble out for an inline textarea
   // populated with the current text. Closes any open right-click menu.
   function handleStartEdit(msg: ChatMessage) {
@@ -961,6 +981,7 @@ export default function ChatView() {
                   isPrivate={ctx.kind === 'friend'}
                   isLastMine={isLastMineMessage(item.msgs, me?.id, messages)}
                   onRecall={handleRecall}
+                  onDelete={handleDelete}
                   onReply={(m) => setReplyingTo(m)}
                   onPin={handlePin}
                   onToggleReaction={handleToggleReaction}
@@ -1110,25 +1131,39 @@ export default function ChatView() {
   );
 }
 
+// ReplyQuote renders the gray "quoted message" strip above a reply.
+// Two render paths:
+//   - parent is live in the local cache → render real text + senderName
+//     (most accurate; shows the latest edited body etc.)
+//   - parent is gone (deleted / past retention) but the reply has the
+//     server-embedded _replyToSnapshot in its own content → render
+//     from the snapshot so the quote still makes sense.
+// Both absent → muted "[原消息已不存在]" — the legitimate empty state.
 function ReplyQuote({
   parent,
+  snapshot,
   nameLookup,
 }: {
   parent: ChatMessage | undefined;
+  snapshot: { senderId: string; type: string; preview: string } | undefined;
   nameLookup: Map<string, string>;
 }) {
-  if (!parent) {
+  if (!parent && !snapshot) {
     return (
       <div className="text-xs text-ink-4 italic mb-1 pl-2 border-l-2 border-bg-5/60">
         原消息已不存在
       </div>
     );
   }
-  const senderName = nameLookup.get(parent.senderId) ?? `用户 ${parent.senderId}`;
+  // Prefer the live parent when we have it — gives accurate edit
+  // state. Fall back to snapshot when the original is gone.
+  const senderId = parent?.senderId ?? snapshot!.senderId;
+  const senderName = nameLookup.get(senderId) ?? `用户 ${senderId}`;
+  const preview = parent ? previewOf(parent) : snapshot!.preview;
   return (
     <div className="text-xs mb-1 pl-2 border-l-2 border-brand-500/60 max-w-full overflow-hidden">
       <div className="text-brand-300 font-medium truncate">{senderName}</div>
-      <div className="text-ink-3 truncate">{previewOf(parent)}</div>
+      <div className="text-ink-3 truncate">{preview}</div>
     </div>
   );
 }
@@ -1149,6 +1184,7 @@ function MessageGroup({
   isPrivate,
   isLastMine,
   onRecall,
+  onDelete,
   onReply,
   onPin,
   onToggleReaction,
@@ -1174,6 +1210,7 @@ function MessageGroup({
   isPrivate: boolean;
   isLastMine: string | null;
   onRecall: (m: ChatMessage) => void;
+  onDelete: (m: ChatMessage) => void;
   onReply: (m: ChatMessage) => void;
   onPin: (m: ChatMessage) => void;
   onToggleReaction: (m: ChatMessage, emoji: string) => void;
@@ -1222,7 +1259,20 @@ function MessageGroup({
                     setMenuFor(menuFor === m.id ? null : m.id);
                   }}
                 >
-                  {m.replyTo && <ReplyQuote parent={parent} nameLookup={nameLookup} />}
+                  {m.replyTo && (
+                    <ReplyQuote
+                      parent={parent}
+                      snapshot={
+                        // Embedded snapshot is shaped { senderId, type, preview }
+                        // — the server attaches it at send time so the quote
+                        // preview survives original-message deletion.
+                        (m.content?._replyToSnapshot as
+                          | { senderId: string; type: string; preview: string }
+                          | undefined) ?? undefined
+                      }
+                      nameLookup={nameLookup}
+                    />
+                  )}
                   {isEditing ? (
                     <EditMessageInline
                       mine={mine}
@@ -1348,6 +1398,18 @@ function MessageGroup({
                         className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-bg-4"
                       >
                         <RotateCcw size={14} /> 撤回
+                      </button>
+                    )}
+                    {/* canDelete: own message, no recall-flag race, and within
+                        the server's 30-day retention window. Server will
+                        return 403 past this so we hide the menu item
+                        client-side rather than offer a sure-to-fail click. */}
+                    {mine && !m.isRecalled && (Date.now() - new Date(m.createdAt).getTime() < 30 * 24 * 60 * 60 * 1000) && (
+                      <button
+                        onClick={() => onDelete(m)}
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-bg-4 text-accent-red"
+                      >
+                        <Trash2 size={14} /> 删除
                       </button>
                     )}
                   </div>

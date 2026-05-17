@@ -192,6 +192,22 @@ func (r *Repo) GetByID(ctx context.Context, msgID int64) (*Message, error) {
 	return m, nil
 }
 
+// Delete hard-removes a message row. CASCADE on FK constraints drops
+// reactions / pins / read receipts that reference it. Caller MUST
+// have verified ownership + retention window. After this call the
+// server has no copy at all — only clients that synced before the
+// delete retain it (in their local archive, if any).
+func (r *Repo) Delete(ctx context.Context, msgID int64) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM messages WHERE id = $1`, msgID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrMessageNotFound
+	}
+	return nil
+}
+
 // Edit rewrites the content of a text message and bumps edit_count +
 // edited_at. Caller must already have checked ownership, window, and
 // recall state. Returns the updated row for fan-out.

@@ -117,6 +117,12 @@ func main() {
 	// expired email-verify / password-reset tokens / draw selections.
 	// Runs hourly.
 	go auth.RunCleanupLoop(ctx, pool, log)
+	// Background sweeper for the message retention window. Deletes
+	// messages older than message.RetentionWindow (30 days) except
+	// pinned ones. After deletion the server can no longer recall /
+	// edit / delete those messages — the client's local archive (if
+	// any) is the only remaining copy. See internal/message/cleanup.go.
+	go message.RunRetentionLoop(ctx, pool, log)
 
 	// Account-number pool: populate any open segment that's missing
 	// rows. Idempotent — on warm boots this is a no-op. On the first

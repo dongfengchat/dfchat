@@ -40,6 +40,7 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	write.Use(middleware.RateLimitPerUser(5, 15))
 	write.POST("", h.send)
 	write.PATCH("/:id", h.edit)
+	write.DELETE("/:id", h.delete) // permanent server-side delete; mirrors PATCH
 	write.POST("/:id/recall", h.recall)
 	write.POST("/:id/reactions", h.addReaction)
 	write.DELETE("/:id/reactions/:emoji", h.removeReaction)
@@ -222,29 +223,57 @@ func (h *Handler) send(c *gin.Context) {
 	}
 
 	var replyTo *int64
+	// Quote snapshot — embedded into the reply's own content so the
+	// quoted preview survives even after the original message has been
+	// hard-deleted or aged out of the 30-day retention window. Without
+	// this the client would render "[原消息已不存在]" or worse, leak
+	// the existence of an id it can no longer fetch. The snapshot is
+	// minimal: sender, a short text preview, and the original type so
+	// the client can render "[图片]" / "[文件]" appropriately.
+	content := req.Content
 	if req.ReplyTo != "" {
 		id, perr := strconv.ParseInt(req.ReplyTo, 10, 64)
 		if perr != nil || id <= 0 {
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20026, "message": "invalid replyTo"})
 			return
 		}
-		// Verify the quoted message lives in the SAME conversation. Stops
-		// a user from quoting a private message they have no access to
-		// (the quote-card UI on the client would otherwise leak its
-		// metadata, and the very existence of the id is information).
-		quotedConv, err := h.repo.ConvOfMessage(c.Request.Context(), id)
-		if err != nil || quotedConv != convID {
+		quoted, err := h.repo.GetByID(c.Request.Context(), id)
+		if err != nil || quoted.ConversationID != convID {
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20027, "message": "replyTo not in this conversation"})
 			return
 		}
 		replyTo = &id
+
+		// Splice a `_replyToSnapshot` field into the JSON content. We
+		// stash it under a leading-underscore key to keep it out of
+		// any naive type-specific schema (`text` content normally
+		// only has `{text}`); the client looks for it explicitly.
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(content, &raw); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20024, "message": "content must be valid JSON"})
+			return
+		}
+		snap := map[string]any{
+			"senderId": strconv.FormatInt(quoted.SenderID, 10),
+			"type":     quoted.Type,
+			"preview":  previewOf(quoted),
+		}
+		if quoted.IsRecalled {
+			snap["preview"] = "[消息已撤回]"
+		}
+		if b, err := json.Marshal(snap); err == nil {
+			raw["_replyToSnapshot"] = b
+			if patched, err := json.Marshal(raw); err == nil {
+				content = patched
+			}
+		}
 	}
 
 	m, err := h.repo.Insert(c.Request.Context(), InsertParams{
 		ConversationID: convID,
 		SenderID:       uid,
 		Type:           req.Type,
-		Content:        req.Content,
+		Content:        content,
 		Mentions:       mentions,
 		ReplyTo:        replyTo,
 	})
@@ -258,6 +287,48 @@ func (h *Handler) send(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"message": m})
+}
+
+// previewOf builds a short, type-appropriate string describing a
+// message, used by the reply snapshot so quote previews survive even
+// after the original message is gone. Capped to 120 chars so we don't
+// bloat a thread of nested quotes (anti-quote-amplification).
+func previewOf(m *Message) string {
+	switch m.Type {
+	case "text":
+		var body struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(m.Content, &body)
+		s := body.Text
+		runes := []rune(s)
+		if len(runes) > 120 {
+			s = string(runes[:120]) + "…"
+		}
+		return s
+	case "image":
+		return "[图片]"
+	case "file":
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(m.Content, &body)
+		if body.Name != "" {
+			return "[文件] " + body.Name
+		}
+		return "[文件]"
+	case "audio":
+		return "[语音]"
+	case "video":
+		return "[视频]"
+	case "sticker":
+		return "[贴纸]"
+	case "call":
+		return "[通话]"
+	case "livestream":
+		return "[直播]"
+	}
+	return "[消息]"
 }
 
 func parseMentions(raw []string) []int64 {
@@ -351,6 +422,70 @@ func (h *Handler) recall(c *gin.Context) {
 // conversation_members is the single source of truth.
 func (h *Handler) membersOf(c *gin.Context, convID string) ([]int64, error) {
 	return h.repo.MembersOf(c.Request.Context(), convID)
+}
+
+// delete permanently removes a message from the server. Unlike recall
+// (which keeps the row + flag for sequencing continuity), delete drops
+// the row entirely — reactions / pins / read_receipts cascade away,
+// and conversations.last_message_id gets repaired by the retention
+// sweeper if it pointed at this row.
+//
+// Authority window mirrors RetentionWindow: within 30 days the author
+// can manually delete; beyond that the server doesn't have the row
+// anyway (the retention sweeper already removed it). The handler
+// rejects requests outside the window with a clear error so the UI
+// can stop showing a "delete" menu item rather than just 404-ing.
+//
+// Fan-out goes as `chat.delete` with { messageId, conversationId,
+// deletedBy }. Clients with a local archive should KEEP their copy
+// (this is the whole point of the "30-day server authority horizon"
+// design) — the event is informational so the in-flight server-side
+// view updates.
+func (h *Handler) delete(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 20090, "message": "invalid id"})
+		return
+	}
+	orig, err := h.repo.GetByID(c.Request.Context(), id)
+	if errors.Is(err, ErrMessageNotFound) {
+		// Could be already past retention — the server simply doesn't
+		// have it. From the user's POV that's fine: it's gone.
+		c.Status(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	if orig.SenderID != uid {
+		// Group admins can use moderation tools (not yet built);
+		// regular users can only delete their own.
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 20091, "message": "not your message"})
+		return
+	}
+	if time.Since(orig.CreatedAt) > RetentionWindow {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 20092, "message": "超过保留期，服务端已自动清理"})
+		return
+	}
+	if err := h.repo.Delete(c.Request.Context(), id); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	// Fan-out so live clients update the in-memory chat view. Clients
+	// with persistent local archives should treat this as "remove
+	// from server-backed view" — their local copy stays.
+	members, _ := h.membersOf(c, orig.ConversationID)
+	payload := gin.H{
+		"messageId":      strconv.FormatInt(id, 10),
+		"conversationId": orig.ConversationID,
+		"deletedBy":      strconv.FormatInt(uid, 10),
+	}
+	for _, member := range members {
+		h.bus.Publish(member, wsbus.Event{Type: "chat.delete", Payload: payload})
+	}
+	c.Status(http.StatusNoContent)
 }
 
 type editReq struct {

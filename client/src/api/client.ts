@@ -739,6 +739,18 @@ export async function editMessage(messageId: string, text: string): Promise<Chat
   } catch (e) { throw unwrapError(e); }
 }
 
+// deleteMessage permanently removes an own message from the server.
+// Different from recall: recall keeps a redacted placeholder row for
+// seq continuity; delete drops the row entirely. Server enforces a
+// 30-day retention window (after which the sweeper has already
+// cleaned the row up anyway). Local archive — if any — is unaffected
+// by design: this is the "30-day server authority horizon" model.
+export async function deleteMessage(messageId: string): Promise<void> {
+  try {
+    await api.delete(`/api/v1/messages/${messageId}`);
+  } catch (e) { throw unwrapError(e); }
+}
+
 export interface AdminStats {
   totalUsers: number;
   totalGroups: number;
