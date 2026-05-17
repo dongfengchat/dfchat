@@ -50,7 +50,7 @@ fi
 echo "==> rsync project to ${USER}@${HOST}:${REMOTE_DIR}"
 $SSH "mkdir -p ${REMOTE_DIR}/data/postgres ${REMOTE_DIR}/data/redis ${REMOTE_DIR}/data/minio ${REMOTE_DIR}/data/letsencrypt"
 
-rsync -az --delete \
+rsync -az --delete --inplace \
   --exclude '.git' \
   --exclude 'client/node_modules' \
   --exclude 'client/dist' \
@@ -72,7 +72,15 @@ $SSH "cp ${REMOTE_DIR}/deploy/.env.prod ${REMOTE_DIR}/.env && chmod 600 ${REMOTE
 
 # ---- 3. Build + bring up stack ---------------------------------------
 echo "==> docker compose up -d --build (this builds the Go image)"
-$SSH "cd ${REMOTE_DIR} && docker compose -f deploy/docker-compose.prod.yml --env-file .env up -d --build"
+# --remove-orphans: if we delete a service from compose.yml (e.g. moved
+# srs to server02), this stops + removes the dangling container. Without
+# this flag, docker compose silently leaves orphans running forever.
+# --force-recreate on nginx: bind-mounted config files (like nginx.conf)
+# replaced by rsync atomic-rename change inode; the container keeps the
+# old inode open and serves stale config until restart. Force-recreate
+# nginx to bind the new inode.
+$SSH "cd ${REMOTE_DIR} && docker compose -f deploy/docker-compose.prod.yml --env-file .env up -d --build --remove-orphans"
+$SSH "cd ${REMOTE_DIR} && docker compose -f deploy/docker-compose.prod.yml --env-file .env restart nginx >/dev/null 2>&1 && echo '  -> nginx restarted to pick up bind-mounted config'"
 
 # ---- 4. Health check -------------------------------------------------
 echo "==> waiting for /healthz"

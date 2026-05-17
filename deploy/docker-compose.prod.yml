@@ -70,62 +70,12 @@ services:
       timeout: 5s
       retries: 5
 
-  srs:
-    image: ossrs/srs:6
-    restart: unless-stopped
-    # SRS doesn't expand env vars inside its config file. envsubst isn't in
-    # the base image and apk often fails offline, so use plain busybox sed
-    # to substitute ${LIVE_SRS_HOOK_URL} → its value at start time.
-    entrypoint:
-      - sh
-      - -c
-      - |
-        sed "s|\$${LIVE_SRS_HOOK_URL}|$$LIVE_SRS_HOOK_URL|g" \
-          /usr/local/srs/conf/dfchat.conf.tmpl \
-          > /usr/local/srs/conf/dfchat.conf
-        # Background ts/mp4 sweeper. SRS only cleans HLS segments on a
-        # clean stream end; if SRS crashes or kill -9 mid-stream, the
-        # ts files linger forever (~19 GB/wk per active stream). Every
-        # 30 min, drop any .ts / .mp4 under live/ that wasn't touched
-        # in the last hour AND whose owning stream isn't currently
-        # publishing (checked via SRS HTTP API). Idempotent — safe to
-        # run with SRS still serving live segments.
-        (
-          while sleep 1800; do
-            now=$$(date +%s)
-            # Active stream names from SRS HTTP API. The grep -o regex
-            # extracts each "name":"<key>" value; xargs flattens to one
-            # name per line for the grep -v exclusion below.
-            active=$$(wget -qO- http://127.0.0.1:1985/api/v1/streams 2>/dev/null \
-                      | grep -o '"name":"[^"]*"' \
-                      | sed 's/"name":"\(.*\)"/\1/' \
-                      | tr "\n" "|" | sed 's/|$$//')
-            find /usr/local/srs/objs/nginx/html/live -type f \
-              \( -name '*.ts' -o -name '*.mp4' -o -name '*.m3u8' \) \
-              -mmin +60 -print 2>/dev/null | while read f; do
-                base=$$(basename "$$f" | sed 's/\.[^.]*$$//' | sed 's/-[0-9]*$$//')
-                if [ -n "$$active" ] && echo "$$base" | grep -Eq "^($$active)$$"; then
-                  continue
-                fi
-                rm -f -- "$$f"
-              done
-          done
-        ) &
-        exec ./objs/srs -c conf/dfchat.conf
-    environment:
-      LIVE_SRS_HOOK_URL: http://api:8080/api/v1/live/srs-hook/${LIVE_SRS_SECRET}
-    volumes:
-      - ./srs.conf:/usr/local/srs/conf/dfchat.conf.tmpl:ro
-      # HLS segments + DVR mp4s persist here so they survive container restarts.
-      - /opt/dfchat/data/srs:/usr/local/srs/objs/nginx/html
-    ports:
-      - "1935:1935"           # RTMP ingest, public for OBS
-      - "127.0.0.1:1985:1985" # SRS HTTP API, localhost only
-    # HTTP-FLV / HLS on container :8080 is consumed via the docker network
-    # by nginx (proxy /hls + /live.flv). No public mapping needed.
-    depends_on:
-      api:
-        condition: service_started
+  # SRS moved to server02 (live.dfchat.chat) — see deploy/server02/.
+  # api now talks to SRS only via the public on_publish hook coming
+  # in over https://app.dfchat.chat/api/v1/live/srs-hook/<secret>. The
+  # `srs.conf` and old `/opt/dfchat/data/srs/` data dir are dead weight
+  # on server01 now; keep the data dir for a couple weeks in case we
+  # need to roll back, then `rm -rf` once everyone's on v0.1.32+.
 
   migrate:
     image: migrate/migrate:v4.18.1
@@ -183,7 +133,15 @@ services:
       LIVE_RTMP_URL: ${LIVE_RTMP_URL}
       LIVE_HLS_URL: ${LIVE_HLS_URL}
       LIVE_SRS_SECRET: ${LIVE_SRS_SECRET}
-      SRS_API_BASE_URL: http://srs:1985/api/v1/summaries
+      # SRS reconcile loop is disabled — the SRS HTTP API moved to
+      # server02 and isn't reachable cross-host without a private
+      # tunnel. Empty value makes the loop log "disabled" and skip.
+      # Trade-off: if SRS on server02 restarts mid-stream and the
+      # on_unpublish webhooks are lost, affected rooms stay status=1
+      # until the host manually clicks 结束直播. To re-enable: expose
+      # SRS API on server02 via a secret-auth nginx location and set
+      # SRS_API_BASE_URL=https://live.dfchat.chat/srs-api/...
+      SRS_API_BASE_URL: ""
       TURN_SECRET: ${TURN_SECRET}
       TURN_HOST: ${TURN_HOST:-dfchat.chat}
       TURN_TLS_ENABLED: "true"

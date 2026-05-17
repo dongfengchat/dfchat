@@ -41,6 +41,7 @@ deploy/.env.prod
 server.rtf
 server.txt
 server.md
+server*.rtf
 *.credentials
 
 # Local build caches
