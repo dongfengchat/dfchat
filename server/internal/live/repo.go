@@ -399,29 +399,27 @@ func (r *Repo) TryClaimPublisher(ctx context.Context, streamKey, clientID string
 	if err != nil {
 		return false, nil, err
 	}
-	// Status condition: allow the claim if the slot is free, OR this
-	// is the same client reconnecting, OR the row is currently
-	// status=2 (ended — previous broadcast is over, so no contention
-	// with another live publisher even if the binding lingers). The
-	// status=2 case matters because on_unpublish leaves the row in
-	// (status=2, current_publish_client_id NULL) but a row that was
-	// already status=2 when a new publisher arrives might still have
-	// a stale binding from before — without this clause OBS could
-	// never restart broadcast on the same key.
-	tag, err := r.pool.Exec(ctx, `
-		UPDATE live_rooms
-		   SET current_publish_client_id = $2
-		 WHERE id = $1
-		   AND (
-		         current_publish_client_id IS NULL
-		         OR current_publish_client_id = $2
-		         OR status = 2
-		       )`,
+	// We always overwrite the binding. Rationale: SRS enforces single-
+	// publisher exclusivity at the RTMP layer — it will NOT call this
+	// hook for a second concurrent publisher on the same stream key
+	// (it rejects the connection before ever firing on_publish). So
+	// when we receive on_publish, the previous binding is by
+	// definition stale: the old SRS session is gone (crashed, network
+	// loss, on_unpublish dropped, etc.). The earlier "reject if slot
+	// held by a different client_id" guard was preventing legit
+	// owner restarts after any abandoned session, with no actual
+	// security benefit.
+	//
+	// Leaked-stream-key takeover (attacker grabs the key from an HLS
+	// URL and pushes while owner is offline) is still bounded by the
+	// 5-minute abandoned-key sweeper (see RotateAbandonedStreamKeys).
+	_, err = r.pool.Exec(ctx, `
+		UPDATE live_rooms SET current_publish_client_id = $2 WHERE id = $1`,
 		rm.ID, clientID)
 	if err != nil {
 		return false, rm, err
 	}
-	return tag.RowsAffected() == 1, rm, nil
+	return true, rm, nil
 }
 
 // ReleasePublisher clears the publisher binding AND rotates the stream
@@ -734,8 +732,11 @@ type Danmaku struct {
 // gets empty strings rather than ErrNotFound; danmaku from deleted
 // accounts should still render, just without a name.
 func (r *Repo) UserDisplay(ctx context.Context, userID int64) (nickname, accountNo string, err error) {
+	// account_no is bigint NOT NULL — cast to text so COALESCE doesn't
+	// trip "invalid input syntax for type bigint: ''" when the user
+	// row exists but we're shielding callers from a hard fail.
 	row := r.pool.QueryRow(ctx,
-		`SELECT COALESCE(nickname,''), COALESCE(account_no,'') FROM users WHERE id = $1`,
+		`SELECT COALESCE(nickname,''), COALESCE(account_no::text,'') FROM users WHERE id = $1`,
 		userID)
 	if err = row.Scan(&nickname, &accountNo); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -766,7 +767,7 @@ func (r *Repo) RecentDanmaku(ctx context.Context, roomID int64, limit int) ([]Da
 	}
 	rows, err := r.pool.Query(ctx,
 		`SELECT t.id, t.room_id, t.sender_id, t.content, COALESCE(t.color,''), t.created_at,
-		        COALESCE(u.nickname,''), COALESCE(u.account_no,'')
+		        COALESCE(u.nickname,''), COALESCE(u.account_no::text,'')
 		   FROM (
 		     SELECT id, room_id, sender_id, content, color, created_at
 		       FROM live_danmaku WHERE room_id = $1
@@ -844,14 +845,16 @@ func (r *Repo) ListReports(ctx context.Context, status int16, limit int) ([]Repo
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
+	// account_no is BIGINT in users — COALESCE(bigint, '') errors with
+	// "invalid input syntax for type bigint", so cast to text first.
 	rows, err := r.pool.Query(ctx, `
 		SELECT
 		  rep.id, rep.room_id, rep.reporter_id, rep.reason, COALESCE(rep.note,''),
 		  COALESCE(rep.thumbnail_url,''), rep.status, rep.reviewed_by, rep.reviewed_at,
 		  COALESCE(rep.action_taken,''), rep.created_at,
 		  rm.title, rm.owner_id, rm.status, COALESCE(rm.cover_url,''), rm.stream_key,
-		  COALESCE(uo.nickname,''), COALESCE(uo.account_no,''),
-		  COALESCE(ur.nickname,''), COALESCE(ur.account_no,'')
+		  COALESCE(uo.nickname,''), COALESCE(uo.account_no::text,''),
+		  COALESCE(ur.nickname,''), COALESCE(ur.account_no::text,'')
 		  FROM live_room_reports rep
 		  JOIN live_rooms rm ON rm.id = rep.room_id
 		  LEFT JOIN users uo ON uo.id = rm.owner_id

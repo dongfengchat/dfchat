@@ -794,7 +794,7 @@ func (h *Handler) livePatrol(c *gin.Context) {
 		SELECT rm.id, rm.title, rm.owner_id, rm.viewer_count,
 		       COALESCE(rm.started_at::text,''),
 		       rm.stream_key,
-		       COALESCE(u.nickname,''), COALESCE(u.account_no,'')
+		       COALESCE(u.nickname,''), COALESCE(u.account_no::text,'')
 		  FROM live_rooms rm
 		  LEFT JOIN users u ON u.id = rm.owner_id
 		 WHERE rm.status = 1 AND rm.is_test = FALSE
