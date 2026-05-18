@@ -40,6 +40,77 @@ const isDev = !!VITE_DEV_SERVER_URL;
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+// Child windows we've spawned for live-room popouts (and any future
+// internal popouts). Tracked so closed ones get garbage-collected.
+const childWindows = new Set<BrowserWindow>();
+
+// handleWindowOpen decides what to do when the renderer calls
+// window.open(url). Internal app URLs — meaning Vite dev server, or
+// our packaged file:// index.html — open as a new BrowserWindow
+// sharing the preload + webPreferences. Everything else (real
+// external links) drops to the OS browser via shell.openExternal so
+// we never load arbitrary web content with our preload privileges.
+function isInternalURL(url: string): boolean {
+  if (isDev && VITE_DEV_SERVER_URL && url.startsWith(VITE_DEV_SERVER_URL)) {
+    return true;
+  }
+  // Packaged: index.html lives next to main.mjs under dist/. Compare
+  // by basename so the hash route after # doesn't trip path-equality.
+  if (!isDev && url.startsWith('file://')) {
+    try {
+      const u = new URL(url);
+      const expected = path.join(__dirname, '../dist/index.html');
+      return path.normalize(u.pathname) === path.normalize(expected) ||
+             u.pathname.endsWith('/dist/index.html');
+    } catch { return false; }
+  }
+  return false;
+}
+
+function handleWindowOpen({ url }: { url: string }): Electron.WindowOpenHandlerResponse {
+  if (!isInternalURL(url)) {
+    shell.openExternal(url);
+    return { action: 'deny' };
+  }
+  // Allow popout. Use a smaller default size so live popouts feel
+  // like a side window, not a clone of the main window. The renderer
+  // can still resize. Preload + sandbox match the main window so the
+  // popout has the same window.* APIs (notifications, archive, etc.).
+  const isMac = process.platform === 'darwin';
+  const isWin = process.platform === 'win32';
+  return {
+    action: 'allow',
+    overrideBrowserWindowOptions: {
+      width: 1024,
+      height: 720,
+      minWidth: 640,
+      minHeight: 480,
+      backgroundColor: '#0b0d11',
+      title: '东风快信',
+      titleBarStyle: isMac ? 'hiddenInset' : isWin ? 'hidden' : 'default',
+      trafficLightPosition: isMac ? { x: 14, y: 12 } : undefined,
+      titleBarOverlay: isWin
+        ? { color: '#15171d', symbolColor: '#cbd0d8', height: 36 }
+        : undefined,
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.mjs'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    },
+  };
+}
+
+// Called by Electron when the popout BrowserWindow is actually
+// created. We attach the same setWindowOpenHandler so a popout can
+// itself spawn popouts (nested live rooms), and track it for cleanup.
+app.on('browser-window-created', (_event, win) => {
+  if (win === mainWindow) return;
+  childWindows.add(win);
+  win.webContents.setWindowOpenHandler(handleWindowOpen);
+  win.on('closed', () => childWindows.delete(win));
+});
 
 function showOrCreateWindow() {
   if (mainWindow) {
@@ -75,10 +146,9 @@ function showOrCreateWindow() {
     },
   });
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
+  mainWindow.webContents.setWindowOpenHandler((details) =>
+    handleWindowOpen(details),
+  );
 
   if (isDev) {
     mainWindow.loadURL(VITE_DEV_SERVER_URL!);

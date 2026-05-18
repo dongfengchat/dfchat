@@ -25,6 +25,11 @@ export default function App() {
         <Route path="/admin" element={<Admin />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/live" element={<Live />} />
+        {/* Deep-link form: opening a specific room in a popout window
+            uses /live/:roomId so the new Electron window lands inside
+            the room directly. The Live page reads the param and skips
+            its own Discover / Studio chrome when ?popout=1 is set. */}
+        <Route path="/live/:roomId" element={<Live />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <Toaster />

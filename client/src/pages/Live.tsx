@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Activity,
   ArrowLeft,
@@ -9,6 +9,7 @@ import {
   Camera,
   Copy,
   Crown,
+  ExternalLink,
   Eye,
   EyeOff,
   Gauge,
@@ -88,6 +89,12 @@ export default function Live() {
   const me = useUserStore((s) => s.user);
   const [tab, setTab] = useState<Tab>('discover');
   const [active, setActive] = useState<LiveRoom | null>(null); // currently watching
+  // Deep-link / popout: route is /live or /live/:roomId; ?popout=1
+  // marks a window spawned by main-window "弹出" — UI hides the
+  // tab bar + 返回 button so the popout window is just video + chat.
+  const { roomId: routeRoomId } = useParams<{ roomId?: string }>();
+  const [search] = useSearchParams();
+  const isPopout = search.get('popout') === '1';
 
   // Ensure the shared WS is connected. Idempotent — if the user came
   // here from Home the socket is already open and this is a no-op; if
@@ -97,6 +104,32 @@ export default function Live() {
   // Placed before the early return so hook order stays stable.
   useEffect(() => { wsClient.connect(); }, []);
 
+  // Deep-link auto-open: when the URL carries a roomId (we landed via
+  // /live/:roomId, either popout or a regular deep-link), fetch that
+  // room's metadata and switch straight to Watch. Failure (room gone,
+  // owner-only test room) navigates back to /live so Discover renders.
+  useEffect(() => {
+    if (!routeRoomId || active) return;
+    let cancelled = false;
+    const fetcher = !!me && false ? getLiveRoomOwner : getLiveRoom; // public is fine — owner fetch is auto-tried below if needed
+    fetcher(routeRoomId)
+      .then((d) => { if (!cancelled) setActive(d.room); })
+      .catch(async () => {
+        // Public fetch failed — could be a test-mode room owned by us.
+        // Try the owner endpoint as a fallback.
+        try {
+          const d2 = await getLiveRoomOwner(routeRoomId);
+          if (!cancelled) setActive(d2.room);
+        } catch {
+          if (!cancelled) {
+            toast('直播间不存在或已结束', 'error');
+            navigate('/live', { replace: true });
+          }
+        }
+      });
+    return () => { cancelled = true; };
+  }, [routeRoomId]);
+
   if (!me) {
     navigate('/login', { replace: true });
     return null;
@@ -104,22 +137,40 @@ export default function Live() {
 
   return (
     <div className="h-screen flex flex-col bg-bg-1 text-ink-1">
-      <TitleBar title="东风快信 · 直播" />
-      <header className="h-14 px-6 border-b border-bg-5/40 bg-bg-2/60 backdrop-blur flex items-center gap-3 shrink-0">
-        <button onClick={() => navigate('/home')} className="btn-icon" title="返回聊天">
-          <ArrowLeft size={18} />
-        </button>
-        <RadioTower size={18} className="text-brand-300" />
-        <h1 className="text-base font-semibold">直播</h1>
-        <div className="ml-4 flex gap-1">
-          <TabBtn label="广场" active={tab === 'discover'} onClick={() => { setTab('discover'); setActive(null); }} />
-          <TabBtn label="我的直播" active={tab === 'studio'} onClick={() => { setTab('studio'); setActive(null); }} />
-        </div>
-      </header>
+      <TitleBar title={isPopout ? '东风快信 · 直播间' : '东风快信 · 直播'} />
+      {/* Hide the broader nav header when this is a popout window —
+          the popout's job is "just show video + chat", so the 返回 /
+          广场 / 我的直播 chrome is removed. The TitleBar above stays
+          so window controls (close / minimize) and dragging still work. */}
+      {!isPopout && (
+        <header className="h-14 px-6 border-b border-bg-5/40 bg-bg-2/60 backdrop-blur flex items-center gap-3 shrink-0">
+          <button onClick={() => navigate('/home')} className="btn-icon" title="返回聊天">
+            <ArrowLeft size={18} />
+          </button>
+          <RadioTower size={18} className="text-brand-300" />
+          <h1 className="text-base font-semibold">直播</h1>
+          <div className="ml-4 flex gap-1">
+            <TabBtn label="广场" active={tab === 'discover'} onClick={() => { setTab('discover'); setActive(null); }} />
+            <TabBtn label="我的直播" active={tab === 'studio'} onClick={() => { setTab('studio'); setActive(null); }} />
+          </div>
+        </header>
+      )}
 
       <main className="flex-1 min-h-0 overflow-hidden">
         {active ? (
-          <Watch room={active} onBack={() => setActive(null)} />
+          <Watch
+            room={active}
+            isPopout={isPopout}
+            onBack={() => {
+              // In popout windows there's no "back to Discover" — just
+              // close the window when the viewer hits 返回.
+              if (isPopout) { window.close(); return; }
+              setActive(null);
+              // Drop the /live/:roomId from the URL so a refresh
+              // doesn't re-enter the same room. Replace not push.
+              if (routeRoomId) navigate('/live', { replace: true });
+            }}
+          />
         ) : tab === 'discover' ? (
           <Discover onOpen={(r) => setActive(r)} />
         ) : (
@@ -364,7 +415,7 @@ function Discover({ onOpen }: { onOpen: (r: LiveRoom) => void }) {
 
 // ===== Watch (HLS + danmaku) ===================================
 
-function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
+function Watch({ room, onBack, isPopout = false }: { room: LiveRoom; onBack: () => void; isPopout?: boolean }) {
   const me = useUserStore((s) => s.user);
   const [detail, setDetail] = useState<LiveRoomDetail | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -980,6 +1031,34 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
               >
                 <Camera size={14} />
               </button>
+              {/* 弹出窗口 — open this live room in a separate Electron
+                  BrowserWindow so the main window can stay on chat.
+                  Hidden inside the popout itself (no recursive popout).
+                  Closes the in-main view after a successful open so
+                  the viewer doesn't end up with two players playing
+                  the same room. */}
+              {!isPopout && (
+                <button
+                  onClick={() => {
+                    const popout = window.open(
+                      `#/live/${room.id}?popout=1`,
+                      '_blank',
+                      'width=1024,height=720',
+                    );
+                    if (popout) {
+                      // Hand off — close the in-main view so we're
+                      // back on Discover (or wherever we came from).
+                      onBack();
+                    } else {
+                      toast('当前环境不支持弹出窗口', 'error');
+                    }
+                  }}
+                  className="p-1.5 rounded bg-black/55 hover:bg-black/75 text-white text-xs"
+                  title="弹出独立窗口（边看边聊天）"
+                >
+                  <ExternalLink size={14} />
+                </button>
+              )}
               <button
                 onClick={() => {
                   const next = !showStats;
