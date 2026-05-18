@@ -57,6 +57,25 @@ type Config struct {
 	// e.g. "https://dfchat.chat" so the link looks like
 	//   https://dfchat.chat/verify-email?token=xxxxx
 	PublicBaseURL string
+
+	// AI moderation worker. Empty Providers / Enabled=false disables.
+	// The worker pulls thumbnails from server02 and files
+	// reporter_id=NULL reports into the same admin queue as user
+	// reports — operator picks 1+ provider via Providers and supplies
+	// each one's key.
+	ModerationEnabled    bool
+	ModerationProviders  []string // ordered fallback chain
+	ModerationInterval   int      // seconds between sweeps
+	ModerationThreshold  float64  // category score >= triggers flag
+	ModerationAnthropicKey   string
+	ModerationAnthropicModel string
+	ModerationOpenAIKey      string
+	ModerationOpenAIModel    string
+	ModerationOpenAIBaseURL  string
+	ModerationGeminiKey      string
+	ModerationGeminiModel    string
+	ModerationLocalEndpoint  string
+	ModerationLocalModel     string
 }
 
 func Load() (*Config, error) {
@@ -98,6 +117,20 @@ func Load() (*Config, error) {
 		SMTPFrom:      getEnv("SMTP_FROM", ""),
 		SMTPUseTLS:    getEnv("SMTP_USE_TLS", "false") == "true",
 		PublicBaseURL: getEnv("PUBLIC_BASE_URL", "https://dfchat.chat"),
+
+		ModerationEnabled:        getEnv("MODERATION_ENABLED", "false") == "true",
+		ModerationProviders:      splitCSV(getEnv("MODERATION_PROVIDERS", "anthropic")),
+		ModerationInterval:       getEnvInt("MODERATION_INTERVAL_SECONDS", 60),
+		ModerationThreshold:      getEnvFloat("MODERATION_THRESHOLD", 0.7),
+		ModerationAnthropicKey:   getEnv("ANTHROPIC_API_KEY", ""),
+		ModerationAnthropicModel: getEnv("ANTHROPIC_MODEL", "claude-sonnet-4-7"),
+		ModerationOpenAIKey:      getEnv("OPENAI_API_KEY", ""),
+		ModerationOpenAIModel:    getEnv("OPENAI_MODEL", "gpt-4o-mini"),
+		ModerationOpenAIBaseURL:  getEnv("OPENAI_BASE_URL", ""),
+		ModerationGeminiKey:      getEnv("GEMINI_API_KEY", ""),
+		ModerationGeminiModel:    getEnv("GEMINI_MODEL", "gemini-2.5-flash"),
+		ModerationLocalEndpoint:  getEnv("MODERATION_LOCAL_ENDPOINT", ""),
+		ModerationLocalModel:     getEnv("MODERATION_LOCAL_MODEL", "qwen2.5-vl"),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -129,6 +162,15 @@ func getEnvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			return i
+		}
+	}
+	return fallback
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return fallback

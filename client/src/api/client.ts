@@ -1081,6 +1081,20 @@ export async function adminListLivePatrol(): Promise<LivePatrolRoom[]> {
   } catch (e) { throw unwrapError(e); }
 }
 
+// Evidence images live under /api/v1/admin/live/evidence/<day>/<file>
+// and require an admin JWT — they can't be fetched directly via
+// <img src>. This helper grabs the bytes through axios (which
+// auto-attaches the token) and returns a blob URL the caller can
+// drop into an <img>. The caller MUST URL.revokeObjectURL when done
+// (the EvidenceImg component in Admin.tsx handles that for us).
+export async function adminFetchEvidenceBlobURL(apiPath: string): Promise<string> {
+  // apiPath is like "/api/v1/admin/live/evidence/20260518/abc-12345.jpg".
+  // Strip the leading "/api/v1" because axios baseURL already covers it.
+  const path = apiPath.replace(/^\/api\/v1/, '');
+  const res = await api.get(path, { responseType: 'blob' });
+  return URL.createObjectURL(res.data);
+}
+
 export function channelConvId(channelId: string): string {
   return `c_${channelId}`;
 }

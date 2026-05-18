@@ -17,6 +17,7 @@ import (
 	"github.com/dongfang/dfchat/server/internal/group"
 	"github.com/dongfang/dfchat/server/internal/live"
 	"github.com/dongfang/dfchat/server/internal/message"
+	"github.com/dongfang/dfchat/server/internal/moderation"
 	"github.com/dongfang/dfchat/server/internal/realtime"
 	"github.com/dongfang/dfchat/server/internal/search"
 	"github.com/dongfang/dfchat/server/internal/sync"
@@ -119,6 +120,25 @@ func main() {
 	// the key) — this loop enforces "key gets rotated eventually" so
 	// a leaked HLS URL can't take over a future broadcast.
 	liveHandler.RunKeyRotateSweeper(ctx, log, 5*time.Minute)
+	// AI moderation worker. Multi-provider; configured via env
+	// (MODERATION_ENABLED / MODERATION_PROVIDERS / each provider's
+	// own ANTHROPIC_API_KEY / OPENAI_API_KEY / etc). Disabled by
+	// default — operator opts in.
+	liveHandler.RunModerationLoop(ctx, moderation.Config{
+		Enabled:                 cfg.ModerationEnabled,
+		Providers:               cfg.ModerationProviders,
+		IntervalSeconds:         cfg.ModerationInterval,
+		Threshold:               cfg.ModerationThreshold,
+		AnthropicKey:            cfg.ModerationAnthropicKey,
+		AnthropicModel:          cfg.ModerationAnthropicModel,
+		OpenAIKey:               cfg.ModerationOpenAIKey,
+		OpenAIModel:             cfg.ModerationOpenAIModel,
+		OpenAIBaseURL:           cfg.ModerationOpenAIBaseURL,
+		GeminiKey:               cfg.ModerationGeminiKey,
+		GeminiModel:             cfg.ModerationGeminiModel,
+		LocalEndpoint:           cfg.ModerationLocalEndpoint,
+		LocalModel:              cfg.ModerationLocalModel,
+	}, log)
 	// Background reconciler: polls SRS /api/v1/streams every 60 s and
 	// marks any DB row "live" that SRS doesn't actually have a publisher
 	// for as ended. Catches the "OBS crashed mid-stream + on_unpublish

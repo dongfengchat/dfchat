@@ -26,6 +26,7 @@ import {
   adminAccountPoolStats,
   adminBanLiveRoom,
   adminDeleteLiveRoom,
+  adminFetchEvidenceBlobURL,
   adminForceEndLive,
   adminForceLogoutUser,
   adminGrantPremiumNumber,
@@ -675,6 +676,45 @@ function LiveRoomsPanel() {
   );
 }
 
+// EvidenceImg renders a thumbnail-style preview that handles both
+// kinds of URLs the admin queue carries:
+//   - Public server02 thumbnail: "https://live.dfchat.chat/thumbs/..."
+//     → direct <img src>, since /thumbs/ is unauthenticated by design.
+//   - Authed admin evidence:     "/api/v1/admin/live/evidence/..."
+//     → must fetch via axios so the JWT is sent. We grab the bytes,
+//     turn them into a blob: URL, and assign to <img src>. The blob
+//     URL is revoked on unmount to free memory.
+function EvidenceImg({ src, className }: { src: string; className?: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!src) return;
+    // Public URL → use directly.
+    if (!src.startsWith('/api/')) { setUrl(src); return; }
+    let cancelled = false;
+    let createdBlob: string | null = null;
+    adminFetchEvidenceBlobURL(src)
+      .then((blobURL) => {
+        if (cancelled) { URL.revokeObjectURL(blobURL); return; }
+        createdBlob = blobURL;
+        setUrl(blobURL);
+      })
+      .catch(() => { /* image hidden by parent's onError */ });
+    return () => {
+      cancelled = true;
+      if (createdBlob) URL.revokeObjectURL(createdBlob);
+    };
+  }, [src]);
+  if (!url) return null;
+  return (
+    <img
+      src={url}
+      className={className}
+      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+      alt=""
+    />
+  );
+}
+
 // LiveReportsPanel — pending user reports + AI-system reports.
 // onResolved bumps the parent's pending-count badge optimistically
 // so the UI doesn't have to wait for the next 30 s tick.
@@ -740,15 +780,12 @@ function LiveReportsPanel({ onResolved }: { onResolved: () => void }) {
           const thumb = r.thumbnailUrl || r.roomCoverUrl || '';
           return (
             <div key={r.id} className="card p-3 flex gap-3">
-              {/* Thumbnail evidence — falls back to room cover, then a stock icon. */}
+              {/* Thumbnail evidence — falls back to room cover, then a stock icon.
+                  Uses EvidenceImg which handles both public server02 URLs and
+                  admin-authed /api/v1/admin/live/evidence/ paths transparently. */}
               <div className="w-32 h-20 shrink-0 bg-bg-3 rounded overflow-hidden flex items-center justify-center">
                 {thumb ? (
-                  <img
-                    src={thumb}
-                    className="w-full h-full object-cover"
-                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-                    alt=""
-                  />
+                  <EvidenceImg src={thumb} className="w-full h-full object-cover" />
                 ) : (
                   <Ban size={18} className="text-ink-4" />
                 )}

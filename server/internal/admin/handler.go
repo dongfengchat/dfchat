@@ -52,6 +52,10 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	g.GET("/live/reports", h.listLiveReports)
 	g.POST("/live/reports/:id/resolve", h.resolveLiveReport)
 	g.GET("/live/patrol", h.livePatrol)
+	// Evidence archive served from local disk — AI-moderation worker
+	// snapshots thumbnails at flag time so admin reviews see the
+	// actual offending frame (live thumbs churn every 30 s).
+	g.GET("/live/evidence/:day/:name", h.serveEvidence)
 }
 
 func (h *Handler) requireAdmin(c *gin.Context) {
@@ -787,6 +791,25 @@ type patrolRoom struct {
 	ViewerCount    int    `json:"viewerCount"`
 	StartedAt      string `json:"startedAt,omitempty"`
 	ThumbnailURL   string `json:"thumbnailUrl"`
+}
+
+// serveEvidence streams a JPEG out of the moderation worker's
+// evidence archive directory. Two-segment path (day + name) so the
+// caller can't traverse out of EvidenceDir; we also clean the path
+// + reject any segment containing "..".
+func (h *Handler) serveEvidence(c *gin.Context) {
+	day := c.Param("day")
+	name := c.Param("name")
+	// Defense in depth — Gin already URL-decodes, but a literal
+	// ".." segment after decoding is fatal. Same for slashes.
+	if strings.Contains(day, "..") || strings.Contains(day, "/") ||
+		strings.Contains(name, "..") || strings.Contains(name, "/") {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	full := live.EvidenceDir + "/" + day + "/" + name
+	c.Header("Cache-Control", "private, max-age=86400")
+	c.File(full)
 }
 
 func (h *Handler) livePatrol(c *gin.Context) {

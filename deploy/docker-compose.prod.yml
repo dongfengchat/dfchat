@@ -154,6 +154,32 @@ services:
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://dfchat.chat}
+      # AI moderation worker (Phase B). Disabled by default — flip
+      # MODERATION_ENABLED=true in .env once at least one provider's
+      # API key is configured. MODERATION_PROVIDERS is a CSV fallback
+      # chain (e.g. "anthropic,openai" → try Claude first, GPT if
+      # Claude errors).
+      MODERATION_ENABLED: ${MODERATION_ENABLED:-false}
+      MODERATION_PROVIDERS: ${MODERATION_PROVIDERS:-anthropic}
+      MODERATION_INTERVAL_SECONDS: ${MODERATION_INTERVAL_SECONDS:-60}
+      MODERATION_THRESHOLD: ${MODERATION_THRESHOLD:-0.7}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-7}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      MODERATION_LOCAL_ENDPOINT: ${MODERATION_LOCAL_ENDPOINT:-}
+      MODERATION_LOCAL_MODEL: ${MODERATION_LOCAL_MODEL:-qwen2.5-vl}
+      # Evidence archive — bind-mounted from host below so frames
+      # survive api container restarts.
+      MODERATION_EVIDENCE_DIR: /var/lib/dfchat/evidence
+    volumes:
+      # Evidence archive (AI moderation snapshots). Host path lives
+      # alongside other dfchat data; mounted RW so the api worker
+      # can write + the admin file-server endpoint can read.
+      - /opt/dfchat/data/evidence:/var/lib/dfchat/evidence
 
   nginx:
     image: nginx:1.27-alpine
