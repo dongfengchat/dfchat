@@ -172,6 +172,11 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       MODERATION_LOCAL_ENDPOINT: ${MODERATION_LOCAL_ENDPOINT:-}
       MODERATION_LOCAL_MODEL: ${MODERATION_LOCAL_MODEL:-qwen2.5-vl}
+      # LM Studio runs at :1234 by default on the host. Inside the
+      # api container, "host.docker.internal" reaches the host on
+      # Mac/Windows; Linux operators need their box's LAN IP.
+      LMSTUDIO_ENDPOINT: ${LMSTUDIO_ENDPOINT:-}
+      LMSTUDIO_MODEL: ${LMSTUDIO_MODEL:-qwen2-vl-7b-instruct}
       # Evidence archive — bind-mounted from host below so frames
       # survive api container restarts.
       MODERATION_EVIDENCE_DIR: /var/lib/dfchat/evidence
@@ -180,6 +185,14 @@ services:
       # alongside other dfchat data; mounted RW so the api worker
       # can write + the admin file-server endpoint can read.
       - /opt/dfchat/data/evidence:/var/lib/dfchat/evidence
+    extra_hosts:
+      # On Linux hosts, "host.docker.internal" doesn't resolve by
+      # default — it's a Mac/Windows convention. host-gateway is
+      # Docker's built-in alias for the docker0 bridge IP that maps
+      # to the actual host. With this line the api container can
+      # reach a local LM Studio / Ollama running on the host via
+      # http://host.docker.internal:1234 just like on a dev mac.
+      - "host.docker.internal:host-gateway"
 
   nginx:
     image: nginx:1.27-alpine

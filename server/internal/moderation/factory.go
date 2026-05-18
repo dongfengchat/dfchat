@@ -19,8 +19,14 @@ type Config struct {
 	OpenAIBaseURL   string // override for OpenAI-compat local servers (Ollama/vLLM)
 	GeminiKey       string
 	GeminiModel     string
-	LocalEndpoint   string // OpenAI-compat local endpoint (Ollama etc.). If set, registers a "local" provider.
+	LocalEndpoint   string // OpenAI-compat local endpoint (Ollama, vLLM, etc.). If set, registers a "local" provider.
 	LocalModel      string
+	// LM Studio is also OpenAI-compatible. We give it its own pair of
+	// env vars + factory alias so operators can run BOTH a local
+	// Ollama instance AND an LM Studio instance simultaneously and
+	// reference them by name in MODERATION_PROVIDERS.
+	LMStudioEndpoint string
+	LMStudioModel    string
 }
 
 // Build assembles concrete Provider instances from the config in the
@@ -59,6 +65,16 @@ func Build(c Config) ([]Provider, error) {
 			// string and the provider will skip the Authorization
 			// header.
 			out = append(out, NewOpenAIProvider("", c.LocalModel, c.LocalEndpoint))
+		case "lmstudio", "lm-studio", "lm_studio":
+			// LM Studio defaults to :1234 with no auth. From inside
+			// the api docker container, "host.docker.internal" is
+			// the Mac/Windows host where LM Studio runs; on Linux
+			// hosts the operator passes the box's LAN IP instead.
+			ep := c.LMStudioEndpoint
+			if ep == "" {
+				ep = "http://host.docker.internal:1234"
+			}
+			out = append(out, NewOpenAIProvider("", c.LMStudioModel, ep))
 		default:
 			return nil, ErrUnknownKind
 		}

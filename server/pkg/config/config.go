@@ -76,6 +76,8 @@ type Config struct {
 	ModerationGeminiModel    string
 	ModerationLocalEndpoint  string
 	ModerationLocalModel     string
+	ModerationLMStudioEndpoint string
+	ModerationLMStudioModel    string
 }
 
 func Load() (*Config, error) {
@@ -129,8 +131,10 @@ func Load() (*Config, error) {
 		ModerationOpenAIBaseURL:  getEnv("OPENAI_BASE_URL", ""),
 		ModerationGeminiKey:      getEnv("GEMINI_API_KEY", ""),
 		ModerationGeminiModel:    getEnv("GEMINI_MODEL", "gemini-2.5-flash"),
-		ModerationLocalEndpoint:  getEnv("MODERATION_LOCAL_ENDPOINT", ""),
-		ModerationLocalModel:     getEnv("MODERATION_LOCAL_MODEL", "qwen2.5-vl"),
+		ModerationLocalEndpoint:    getEnv("MODERATION_LOCAL_ENDPOINT", ""),
+		ModerationLocalModel:       getEnv("MODERATION_LOCAL_MODEL", "qwen2.5-vl"),
+		ModerationLMStudioEndpoint: getEnv("LMSTUDIO_ENDPOINT", ""),
+		ModerationLMStudioModel:    getEnv("LMSTUDIO_MODEL", "qwen2-vl-7b-instruct"),
 	}
 
 	if cfg.DatabaseURL == "" {

@@ -138,6 +138,8 @@ func main() {
 		GeminiModel:             cfg.ModerationGeminiModel,
 		LocalEndpoint:           cfg.ModerationLocalEndpoint,
 		LocalModel:              cfg.ModerationLocalModel,
+		LMStudioEndpoint:        cfg.ModerationLMStudioEndpoint,
+		LMStudioModel:           cfg.ModerationLMStudioModel,
 	}, log)
 	// Background reconciler: polls SRS /api/v1/streams every 60 s and
 	// marks any DB row "live" that SRS doesn't actually have a publisher
