@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
+  Activity,
   ArrowLeft,
   Bell,
   BellOff,
@@ -87,6 +88,14 @@ export default function Live() {
   const me = useUserStore((s) => s.user);
   const [tab, setTab] = useState<Tab>('discover');
   const [active, setActive] = useState<LiveRoom | null>(null); // currently watching
+
+  // Ensure the shared WS is connected. Idempotent — if the user came
+  // here from Home the socket is already open and this is a no-op; if
+  // they deep-linked straight to /live (Electron protocol handler or
+  // refresh) Home never mounted, so without this call wsClient.send
+  // would return false and every danmaku would toast "网络中断中".
+  // Placed before the early return so hook order stays stable.
+  useEffect(() => { wsClient.connect(); }, []);
 
   if (!me) {
     navigate('/login', { replace: true });
@@ -176,6 +185,11 @@ function Discover({ onOpen }: { onOpen: (r: LiveRoom) => void }) {
   // Refetch whenever the filters change (skips first mount via a guard ref —
   // initial fetch already happened above with no filters).
   const didMount = useRef(false);
+  // Track current filter values in a ref so the auto-refresh interval
+  // below uses fresh ones without restarting the timer on every keystroke.
+  const filterRef = useRef({ q: '', category: '全部' });
+  filterRef.current = { q: qDebounced, category: activeCategory };
+
   useEffect(() => {
     if (!didMount.current) { didMount.current = true; return; }
     let cancelled = false;
@@ -187,6 +201,36 @@ function Discover({ onOpen }: { onOpen: (r: LiveRoom) => void }) {
       .catch((e) => !cancelled && setError(e.message ?? '加载失败'));
     return () => { cancelled = true; };
   }, [qDebounced, activeCategory]);
+
+  // Auto-refresh the room list so new lives appear without the user
+  // hitting a refresh button. Two triggers:
+  //   - every 30 s on a timer (catches lives started while user is here)
+  //   - when the window regains focus (catches lives started while user
+  //     was in another app — usually shows up instantly when they
+  //     return, which is exactly the "is there anything to watch" beat).
+  // Both reuse the current q/category filters via the ref above.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      if (cancelled || document.hidden) return;
+      const { q, category } = filterRef.current;
+      listLiveRooms({
+        q: q || undefined,
+        category: category === '全部' ? undefined : category,
+      })
+        .then((live) => { if (!cancelled) setRooms(live.rooms); })
+        .catch(() => { /* silent — error banner only fires on initial / filter-change fetches */ });
+    };
+    const timer = window.setInterval(refresh, 30_000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, []);
 
   if (error) return <div className="p-8 text-accent-red">{error}</div>;
   if (rooms === null) return <div className="p-8 text-ink-3 flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> 加载中…</div>;
@@ -364,6 +408,21 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
   // Pin/unpin busy flag — keeps the context-menu items from re-firing
   // while the request is in flight.
   const [pinning, setPinning] = useState(false);
+  // Viewer-side "stats for nerds" panel — kbps, resolution, buffer,
+  // dropped frames, live-edge latency. All measured client-side; no
+  // server roundtrip. Persisted across sessions in localStorage so a
+  // user who wants it stays open.
+  const [showStats, setShowStats] = useState<boolean>(
+    () => localStorage.getItem('live.stats-open') === '1',
+  );
+  const [stats, setStats] = useState<{
+    resW: number; resH: number;
+    kbps: number;          // hls.js measured bandwidth (estimate)
+    bufferS: number;       // seconds buffered ahead of currentTime
+    droppedFrames: number; // cumulative since playback started
+    totalFrames: number;
+    liveLatencyS: number;  // wall-clock lag from the live edge
+  } | null>(null);
 
   // refreshPlayback re-fetches the detail to grab a fresh signed URL
   // (server token TTL is 1 h). Called automatically when hls.js hits a
@@ -626,6 +685,58 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
     }
   }
 
+  // Stats panel poller. Off by default — only ticks when the panel is
+  // visible, so closed = zero overhead. Samples every 1 s; metrics from
+  // the video element directly + hls.js's internal bandwidth estimator
+  // (which is what the ABR ladder uses to pick variants, so it doubles
+  // as the "actual measured throughput" number YouTube shows).
+  useEffect(() => {
+    if (!showStats) { setStats(null); return; }
+    const tick = () => {
+      const v = videoRef.current;
+      const hls = hlsRef.current;
+      if (!v) return;
+      // getVideoPlaybackQuality is the W3C-blessed way to read dropped
+      // frames; some Electron versions still expose webkit* fallbacks.
+      const q = (v as any).getVideoPlaybackQuality?.()
+        ?? { droppedVideoFrames: (v as any).webkitDroppedFrameCount ?? 0,
+             totalVideoFrames:   (v as any).webkitDecodedFrameCount ?? 0 };
+      // Buffer ahead = end of the buffered range currentTime sits in.
+      // Multiple ranges can exist (after seeks); we pick the one
+      // containing currentTime. Falls back to 0 if not buffered yet.
+      let bufferS = 0;
+      for (let i = 0; i < v.buffered.length; i++) {
+        if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) {
+          bufferS = v.buffered.end(i) - v.currentTime;
+          break;
+        }
+      }
+      // bandwidthEstimate is bits/sec; / 1000 → kbps. Falls back to 0
+      // for Safari native playback (no hls.js attached).
+      const kbps = hls?.bandwidthEstimate ? Math.round(hls.bandwidthEstimate / 1000) : 0;
+      // Live latency = how far we are from the live edge. hls.js >=1.2
+      // exposes hls.latency; older versions need liveSyncPosition manual.
+      let liveLatencyS = 0;
+      if (hls) {
+        const latency = (hls as any).latency;
+        if (typeof latency === 'number' && isFinite(latency)) {
+          liveLatencyS = latency;
+        } else if (typeof (hls as any).liveSyncPosition === 'number') {
+          liveLatencyS = Math.max(0, (hls as any).liveSyncPosition - v.currentTime);
+        }
+      }
+      setStats({
+        resW: v.videoWidth, resH: v.videoHeight,
+        kbps, bufferS,
+        droppedFrames: q.droppedVideoFrames, totalFrames: q.totalVideoFrames,
+        liveLatencyS,
+      });
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [showStats]);
+
   // Wire PiP enter/leave events so the button state stays in sync even
   // when the user closes the floating window manually.
   useEffect(() => {
@@ -741,6 +852,54 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
             </div>
           )}
 
+          {/* Viewer stats panel — YouTube "stats for nerds" style.
+              Toggled by the Activity icon in the top-right toolbar. All
+              numbers are pure client-side; no API call. */}
+          {showStats && stats && (
+            <div className="absolute bottom-2 left-2 z-20 pointer-events-none">
+              <div className="bg-black/70 backdrop-blur px-3 py-2 rounded text-[11px] font-mono text-white leading-tight space-y-0.5 min-w-[180px]">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-ink-4">分辨率</span>
+                  <span>{stats.resW > 0 ? `${stats.resW}×${stats.resH}` : '—'}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-ink-4">下行码率</span>
+                  <span>
+                    {stats.kbps > 0
+                      ? stats.kbps >= 1000
+                        ? `${(stats.kbps / 1000).toFixed(2)} Mbps`
+                        : `${stats.kbps} kbps`
+                      : '—'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-ink-4">缓冲</span>
+                  <span>{stats.bufferS.toFixed(1)} s</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-ink-4">直播延迟</span>
+                  <span>{stats.liveLatencyS > 0 ? `${stats.liveLatencyS.toFixed(1)} s` : '—'}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-ink-4">丢帧</span>
+                  <span>
+                    {stats.droppedFrames}
+                    {stats.totalFrames > 0 && (
+                      <span className="text-ink-4">
+                        {' '}/ {stats.totalFrames}
+                        {' ('}{((stats.droppedFrames / stats.totalFrames) * 100).toFixed(2)}%{')'}
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-ink-4">清晰度</span>
+                  <span>{quality === 'ld' ? '流畅 480p' : '原画'}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Player-level error / offline placeholder. Shown when hls.js
               hits an unrecoverable fatal (max retries exhausted) or when
               the API tells us the room is offline. Clears on the next
@@ -807,6 +966,19 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
                 title="截图保存"
               >
                 <Camera size={14} />
+              </button>
+              <button
+                onClick={() => {
+                  const next = !showStats;
+                  setShowStats(next);
+                  localStorage.setItem('live.stats-open', next ? '1' : '0');
+                }}
+                className={`p-1.5 rounded text-white text-xs ${
+                  showStats ? 'bg-brand-500' : 'bg-black/55 hover:bg-black/75'
+                }`}
+                title="码率与画质信息"
+              >
+                <Activity size={14} />
               </button>
             </div>
 

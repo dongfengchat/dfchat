@@ -296,7 +296,11 @@ export default function Home() {
       unsubSeq();
       offActivate?.();
       clearInterval(presenceTimer);
-      wsClient.close();
+      // DO NOT close the WebSocket here. Navigating Home → Live → Home
+      // would otherwise tear down the WS during the page switch, and
+      // any danmaku send from Live would hit "网络中断中" because the
+      // socket was unilaterally closed by Home's cleanup. The WS is
+      // app-lifetime now — only handleLogout closes it.
       void setBadge(0);
       useCallStore.getState().end();
     };

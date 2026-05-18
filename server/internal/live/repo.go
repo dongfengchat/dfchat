@@ -412,11 +412,15 @@ func (r *Repo) TryClaimPublisher(ctx context.Context, streamKey, clientID string
 }
 
 // ReleasePublisher clears the publisher binding AND rotates the stream
-// key. Called from the on_unpublish hook. Rotation matters: by the
-// time the stream is over, the old key has likely been seen by
-// viewers (it's in the HLS URL) — if we don't rotate, the next time
-// the owner starts streaming, anyone with the old URL could push
-// before the legitimate owner does. After this call, the owner must
+// key. Called only for explicit stop events (owner click "结束直播",
+// admin ban, key reset). NOT called from on_unpublish — see
+// RotateAbandonedStreamKeys for the lazy-rotation flow that lets OBS
+// network blips reconnect without losing the key.
+//
+// Rotation matters: by the time the stream is over, the old key has
+// likely been seen by viewers (it's in the HLS URL) — if we don't
+// rotate eventually, anyone with the old URL could push before the
+// legitimate owner does next time. After this call, the owner must
 // fetch the fresh key via /live/rooms/:id/owner.
 //
 // Returns the new key for logging convenience.
@@ -428,9 +432,50 @@ func (r *Repo) ReleasePublisher(ctx context.Context, roomID int64) (string, erro
 	_, err = r.pool.Exec(ctx, `
 		UPDATE live_rooms
 		   SET current_publish_client_id = NULL,
-		       stream_key                = $2
+		       stream_key                = $2,
+		       last_key_rotation_at      = now()
 		 WHERE id = $1`, roomID, newKey)
 	return newKey, err
+}
+
+// RotateAbandonedStreamKeys rotates the stream_key on rooms that have
+// been status=2 (ended) for longer than `maxIdle`, but whose key
+// hasn't been rotated since they ended. Run periodically by the
+// background sweeper.
+//
+// The grace window matters: on_unpublish fires after SRS's
+// publish_normal_timeout (7 s) which trips on any RTMP gap — every
+// brief OBS disconnect, WiFi handoff, or laptop sleep would invalidate
+// the key under the old "rotate inside on_unpublish" design. With
+// this grace flow, OBS reconnecting within maxIdle reuses the same
+// key cleanly; only genuinely abandoned streams get their keys
+// rotated (closing the takeover-by-leaked-HLS-URL window).
+//
+// Returns the IDs that were rotated for logging.
+func (r *Repo) RotateAbandonedStreamKeys(ctx context.Context, maxIdle time.Duration) ([]int64, error) {
+	threshold := time.Now().Add(-maxIdle)
+	rows, err := r.pool.Query(ctx, `
+		UPDATE live_rooms
+		   SET stream_key           = encode(gen_random_bytes(16), 'hex'),
+		       last_key_rotation_at = now()
+		 WHERE status = 2
+		   AND ended_at IS NOT NULL
+		   AND ended_at < $1
+		   AND (last_key_rotation_at IS NULL OR last_key_rotation_at < ended_at)
+		RETURNING id`, threshold)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return ids, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // BumpDanmaku is the +1 counter for total_danmaku, used by the
@@ -494,13 +539,18 @@ func (r *Repo) Delete(ctx context.Context, id, ownerID int64) error {
 }
 
 // RotateStreamKey forces a fresh stream key (e.g. if the old one leaked).
+// Owner-initiated only — see ReleasePublisher for stop-flow rotations
+// and RotateAbandonedStreamKeys for the time-based grace-period sweep.
 func (r *Repo) RotateStreamKey(ctx context.Context, id, ownerID int64) (string, error) {
 	key, err := genStreamKey()
 	if err != nil {
 		return "", err
 	}
 	tag, err := r.pool.Exec(ctx,
-		`UPDATE live_rooms SET stream_key = $3 WHERE id = $1 AND owner_id = $2`,
+		`UPDATE live_rooms
+		    SET stream_key           = $3,
+		        last_key_rotation_at = now()
+		  WHERE id = $1 AND owner_id = $2`,
 		id, ownerID, key)
 	if err != nil {
 		return "", err

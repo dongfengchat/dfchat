@@ -30,7 +30,17 @@ export class WSClient {
     // we always read the latest accessToken from localStorage at the
     // moment of connect, so a REST-interceptor refresh that landed in
     // between is picked up automatically.
+    //
+    // Idempotent: calling connect() repeatedly across different pages
+    // (Home and Live both invoke it on mount) MUST NOT create parallel
+    // sockets. We short-circuit if there's already a healthy or
+    // connecting socket, or if a reconnect timer is already scheduled.
     this.manuallyClosed = false;
+    if (this.ws) {
+      const s = this.ws.readyState;
+      if (s === WebSocket.OPEN || s === WebSocket.CONNECTING) return;
+    }
+    if (this.reconnectTimer) return;
     this.open();
   }
 

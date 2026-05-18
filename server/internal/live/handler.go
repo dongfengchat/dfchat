@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -696,12 +697,18 @@ func (h *Handler) srsHook(c *gin.Context) {
 			c.String(http.StatusOK, "0")
 			return
 		}
-		// Finalize stats first (uses started_at, viewer_count) BEFORE
-		// rotating the key — order matters since both touch the row.
+		// SetEnded already clears current_publish_client_id, freeing the
+		// publisher slot. We DELIBERATELY do not rotate stream_key here
+		// — see RotateAbandonedStreamKeys for the lazy-rotation flow.
+		//
+		// Why: SRS fires on_unpublish after publish_normal_timeout (7 s)
+		// on any RTMP gap — every brief OBS disconnect, WiFi handoff,
+		// or laptop sleep used to invalidate the key, forcing the
+		// streamer to copy a new one before resuming. With this change
+		// OBS can reconnect within the 5-min grace window and keep
+		// going. After the window the background sweeper rotates the
+		// key, restoring the takeover-by-leaked-HLS-URL protection.
 		_ = h.repo.SetEnded(c.Request.Context(), rm.ID)
-		// Rotate the stream key so any viewer who learned it from the
-		// HLS URL can't push to it on the next broadcast.
-		_, _ = h.repo.ReleasePublisher(c.Request.Context(), rm.ID)
 		if h.bus != nil && !rm.IsTest {
 			h.notifyFollowersOffline(c.Request.Context(), rm)
 		}
@@ -760,6 +767,37 @@ func (h *Handler) RunScheduledReminderLoop(ctx context.Context) {
 				return
 			case <-t.C:
 				h.scanScheduled(ctx)
+			}
+		}
+	}()
+}
+
+// RunKeyRotateSweeper rotates stream keys for rooms that have been
+// ended for longer than `grace`. on_unpublish intentionally leaves the
+// key untouched (see comment there); this loop is what enforces the
+// "no-publisher-takeover after a leak" property on a delay.
+//
+// Runs every minute. A streamer who reconnects within grace keeps
+// their key; one who's been away longer gets a fresh key on the next
+// owner-detail fetch. Logged at INFO so a human can audit churn.
+func (h *Handler) RunKeyRotateSweeper(ctx context.Context, log *slog.Logger, grace time.Duration) {
+	go func() {
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				ids, err := h.repo.RotateAbandonedStreamKeys(ctx, grace)
+				if err != nil {
+					log.Error("rotate sweeper failed", "err", err)
+					continue
+				}
+				if len(ids) > 0 {
+					log.Info("rotated abandoned stream keys",
+						"count", len(ids), "ids", ids, "grace", grace)
+				}
 			}
 		}
 	}()

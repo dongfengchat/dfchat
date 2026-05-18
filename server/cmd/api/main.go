@@ -113,6 +113,12 @@ func main() {
 	liveHandler.AttachViewerSource(realtimeHandler)
 	// Background goroutine pushes reminders 0-10 min before scheduled streams.
 	liveHandler.RunScheduledReminderLoop(ctx)
+	// Background sweeper rotates stream keys for rooms that have been
+	// ended for >5 min without an explicit owner stop. on_unpublish
+	// itself no longer rotates (so brief OBS network blips don't lose
+	// the key) — this loop enforces "key gets rotated eventually" so
+	// a leaked HLS URL can't take over a future broadcast.
+	liveHandler.RunKeyRotateSweeper(ctx, log, 5*time.Minute)
 	// Background reconciler: polls SRS /api/v1/streams every 60 s and
 	// marks any DB row "live" that SRS doesn't actually have a publisher
 	// for as ended. Catches the "OBS crashed mid-stream + on_unpublish
