@@ -790,6 +790,122 @@ func (r *Repo) RecentDanmaku(ctx context.Context, roomID int64, limit int) ([]Da
 	return out, rows.Err()
 }
 
+// =============== User reports (admin review queue) ===============
+
+// Report mirrors a row in live_room_reports. The thumbnail_url is
+// captured at the moment of report so evidence survives a stream
+// ending; the reporter side fills it in by querying the latest
+// thumbnail we have on server02. Status 0 = pending, 1 = handled,
+// 2 = dismissed; reviewed_by + action_taken populated on transition.
+type Report struct {
+	ID            int64      `json:"id,string"`
+	RoomID        int64      `json:"roomId,string"`
+	ReporterID    *int64     `json:"reporterId,omitempty,string"`
+	Reason        string     `json:"reason"`
+	Note          string     `json:"note,omitempty"`
+	ThumbnailURL  string     `json:"thumbnailUrl,omitempty"`
+	Status        int16      `json:"status"`
+	ReviewedBy    *int64     `json:"reviewedBy,omitempty,string"`
+	ReviewedAt    *time.Time `json:"reviewedAt,omitempty"`
+	ActionTaken   string     `json:"actionTaken,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	// Joined room snapshot for the admin queue render — saves a
+	// follow-up roundtrip per row to fetch title / owner / status.
+	RoomTitle       string `json:"roomTitle,omitempty"`
+	RoomOwnerID     int64  `json:"roomOwnerId,omitempty,string"`
+	RoomStatus      int    `json:"roomStatus,omitempty"`
+	RoomCoverURL    string `json:"roomCoverUrl,omitempty"`
+	RoomStreamKey   string `json:"-"` // never serialized; used internally for thumbnail URL formatting
+	OwnerNickname   string `json:"ownerNickname,omitempty"`
+	OwnerAccountNo  string `json:"ownerAccountNo,omitempty"`
+	ReporterNickname  string `json:"reporterNickname,omitempty"`
+	ReporterAccountNo string `json:"reporterAccountNo,omitempty"`
+}
+
+// InsertReport adds a pending report. If the same (room, reporter,
+// reason) combo already exists as status=0 the partial unique index
+// in migration 27 rejects the INSERT and we return nil — i.e. "ok,
+// you already reported this". reporterID = nil for system/AI reports.
+func (r *Repo) InsertReport(ctx context.Context, roomID int64, reporterID *int64, reason, note, thumbURL string) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO live_room_reports (room_id, reporter_id, reason, note, thumbnail_url)
+		VALUES ($1, $2, $3, NULLIF($4,''), NULLIF($5,''))
+		ON CONFLICT (room_id, reporter_id, reason)
+		  WHERE reporter_id IS NOT NULL AND status = 0
+		  DO NOTHING`,
+		roomID, reporterID, reason, note, thumbURL)
+	return err
+}
+
+// ListReports returns reports filtered by status, newest first, with
+// joined room + owner + reporter labels so the admin queue can render
+// each row without N+1 follow-ups.
+func (r *Repo) ListReports(ctx context.Context, status int16, limit int) ([]Report, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+		  rep.id, rep.room_id, rep.reporter_id, rep.reason, COALESCE(rep.note,''),
+		  COALESCE(rep.thumbnail_url,''), rep.status, rep.reviewed_by, rep.reviewed_at,
+		  COALESCE(rep.action_taken,''), rep.created_at,
+		  rm.title, rm.owner_id, rm.status, COALESCE(rm.cover_url,''), rm.stream_key,
+		  COALESCE(uo.nickname,''), COALESCE(uo.account_no,''),
+		  COALESCE(ur.nickname,''), COALESCE(ur.account_no,'')
+		  FROM live_room_reports rep
+		  JOIN live_rooms rm ON rm.id = rep.room_id
+		  LEFT JOIN users uo ON uo.id = rm.owner_id
+		  LEFT JOIN users ur ON ur.id = rep.reporter_id
+		 WHERE rep.status = $1
+		 ORDER BY rep.created_at DESC LIMIT $2`, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Report, 0)
+	for rows.Next() {
+		var p Report
+		if err := rows.Scan(
+			&p.ID, &p.RoomID, &p.ReporterID, &p.Reason, &p.Note,
+			&p.ThumbnailURL, &p.Status, &p.ReviewedBy, &p.ReviewedAt,
+			&p.ActionTaken, &p.CreatedAt,
+			&p.RoomTitle, &p.RoomOwnerID, &p.RoomStatus, &p.RoomCoverURL, &p.RoomStreamKey,
+			&p.OwnerNickname, &p.OwnerAccountNo,
+			&p.ReporterNickname, &p.ReporterAccountNo,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ResolveReport transitions a pending report into status=1 (handled)
+// or status=2 (dismissed). Records who reviewed it + the action taken
+// so the audit trail joins cleanly with audit_logs.
+func (r *Repo) ResolveReport(ctx context.Context, id, reviewerID int64, status int16, action string) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE live_room_reports
+		   SET status = $2, reviewed_by = $3, reviewed_at = now(), action_taken = NULLIF($4,'')
+		 WHERE id = $1 AND status = 0`, id, status, reviewerID, action)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// PendingReportCount returns the number of status=0 reports — used by
+// the admin dashboard's red-dot badge.
+func (r *Repo) PendingReportCount(ctx context.Context) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM live_room_reports WHERE status = 0`).Scan(&n)
+	return n, err
+}
+
 // =============== Bans / kicks ===============
 
 func (r *Repo) BanUser(ctx context.Context, roomID, userID, bannedBy int64, isKick bool, reason string) error {

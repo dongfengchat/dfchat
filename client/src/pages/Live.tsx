@@ -12,6 +12,7 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  Flag,
   Gauge,
   Heart,
   KeyRound,
@@ -52,6 +53,7 @@ import {
   listMyLiveRooms,
   listScheduledLiveRooms,
   pinLiveDanmaku,
+  reportLiveRoom,
   rotateLiveStreamKey,
   setLiveRoomSchedule,
   setLiveRoomVisibility,
@@ -62,6 +64,7 @@ import {
   updateLiveRoom,
   uploadBlob,
 } from '@/api/client';
+import type { LiveReportReason } from '@/api/client';
 import { useUserStore } from '@/store/userStore';
 import { wsClient } from '@/ws/client';
 import type { DanmakuEvent, LiveRoom, LiveRoomDetail } from '@/types';
@@ -459,6 +462,10 @@ function Watch({ room, onBack, isPopout = false }: { room: LiveRoom; onBack: () 
   const [stopping, setStopping] = useState(false);
   // Owner-only chat-moderation settings dialog (slow mode + subscribers-only).
   const [showChatSettings, setShowChatSettings] = useState(false);
+  // Viewer-facing report dialog (non-owner only). Submitting fires
+  // POST /live/rooms/:id/report; duplicates of the same (room, user,
+  // reason) collapse on the server via the partial unique index.
+  const [showReport, setShowReport] = useState(false);
   // Pin/unpin busy flag — keeps the context-menu items from re-firing
   // while the request is in flight.
   const [pinning, setPinning] = useState(false);
@@ -1072,6 +1079,18 @@ function Watch({ room, onBack, isPopout = false }: { room: LiveRoom; onBack: () 
               >
                 <Activity size={14} />
               </button>
+              {/* Report button — viewers only. Owner can't report own
+                  room; the server enforces this too but we hide the
+                  button to avoid confusion. */}
+              {!isOwner && (
+                <button
+                  onClick={() => setShowReport(true)}
+                  className="p-1.5 rounded bg-black/55 hover:bg-accent-red/80 text-white text-xs"
+                  title="举报违规内容"
+                >
+                  <Flag size={14} />
+                </button>
+              )}
             </div>
 
           {/* 1080p / source quality consent dialog. Shown once per device. */}
@@ -1392,6 +1411,90 @@ function Watch({ room, onBack, isPopout = false }: { room: LiveRoom; onBack: () 
           onSaved={(updated) => { setLiveRoom(updated); setShowChatSettings(false); }}
         />
       )}
+
+      {showReport && (
+        <ReportDialog
+          roomId={room.id}
+          onClose={() => setShowReport(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ReportDialog — modal where a viewer picks a reason + optional note
+// and we fire POST /live/rooms/:id/report. Server collapses duplicate
+// (room,user,reason) so spamming the button is harmless. We keep this
+// component-local: it doesn't need to live alongside Discover/Studio.
+function ReportDialog({ roomId, onClose }: { roomId: string; onClose: () => void }) {
+  const REASONS: { value: LiveReportReason; label: string; hint?: string }[] = [
+    { value: 'nsfw',     label: '色情 / 低俗', hint: '裸露、低俗暗示、性暗示内容' },
+    { value: 'violence', label: '暴力 / 血腥', hint: '打斗、血腥、虐待、自残' },
+    { value: 'politics', label: '政治敏感', hint: '违反国家相关法规的政治内容' },
+    { value: 'gambling', label: '赌博',     hint: '诱导参与博彩、棋牌赌钱' },
+    { value: 'fraud',    label: '诈骗 / 违规广告', hint: '冒充客服、刷单、卖货导流' },
+    { value: 'other',    label: '其他',     hint: '其他违反平台规则的内容' },
+  ];
+  const [reason, setReason] = useState<LiveReportReason | null>(null);
+  const [note, setNote] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit() {
+    if (!reason) return;
+    setSubmitting(true);
+    try {
+      await reportLiveRoom(roomId, reason, note.trim() || undefined);
+      toast('举报已提交，管理员会尽快处理', 'success');
+      onClose();
+    } catch (e: any) {
+      toast(e?.message ?? '举报失败', 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4 anim-fade" onClick={onClose}>
+      <div className="card w-full max-w-md p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold flex items-center gap-2">
+          <Flag size={16} className="text-accent-red" /> 举报直播
+        </h3>
+        <p className="text-xs text-ink-3 -mt-2">
+          匿名提交给平台管理员审核；同一原因 24h 内只计一次。
+        </p>
+        <div className="space-y-1.5">
+          {REASONS.map((r) => (
+            <button
+              key={r.value}
+              onClick={() => setReason(r.value)}
+              className={`w-full text-left px-3 py-2 rounded border transition-colors ${
+                reason === r.value
+                  ? 'bg-accent-red/10 border-accent-red text-ink-1'
+                  : 'border-bg-5/40 hover:bg-bg-3 text-ink-2'
+              }`}
+            >
+              <div className="text-sm font-medium">{r.label}</div>
+              {r.hint && <div className="text-[11px] text-ink-4 mt-0.5">{r.hint}</div>}
+            </button>
+          ))}
+        </div>
+        <div>
+          <label className="text-xs text-ink-3">补充说明 <span className="text-ink-4">（可选，≤1000 字）</span></label>
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value.slice(0, 1000))}
+            placeholder="时间点、具体描述等"
+            rows={3}
+            className="input mt-1 w-full resize-none"
+          />
+        </div>
+        <div className="flex gap-2 justify-end pt-2 border-t border-bg-5/40">
+          <button onClick={onClose} className="btn-secondary">取消</button>
+          <button onClick={submit} disabled={!reason || submitting} className="btn-primary bg-accent-red hover:bg-accent-red/80">
+            {submitting ? <Loader2 size={14} className="animate-spin" /> : <Flag size={14} />} 提交举报
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

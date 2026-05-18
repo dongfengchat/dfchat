@@ -85,6 +85,9 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	g.POST("/rooms/:id/bans", h.banUser)
 	g.DELETE("/rooms/:id/bans/:userId", h.unbanUser)
 
+	// Reports (viewer flags a broadcast for admin review).
+	g.POST("/rooms/:id/report", h.reportRoom)
+
 	// Recordings (owner deletes)
 	g.DELETE("/recordings/:recId", h.deleteRecording)
 
@@ -982,6 +985,68 @@ type banReq struct {
 	UserID int64  `json:"userId,string"`
 	IsKick bool   `json:"isKick"`
 	Reason string `json:"reason"`
+}
+
+// reportRoom — viewer flags a broadcast for admin review. Body:
+//
+//	{ "reason": "nsfw|violence|politics|gambling|fraud|other",
+//	  "note":   "optional free-form" }
+//
+// Self-reports (owner reporting own room) are rejected with 400 to
+// keep the admin queue clean. Duplicate reports from the same
+// (reporter, room, reason) collapse silently via the partial unique
+// index — caller gets 204 either way. We snapshot a thumbnail URL by
+// formatting the public live edge convention; if no thumbnail file
+// is on disk yet (stream just started), it'll be a broken link in
+// the admin queue and the admin falls back to the room's cover_url.
+type reportReq struct {
+	Reason string `json:"reason"`
+	Note   string `json:"note"`
+}
+
+func (h *Handler) reportRoom(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, ok := parseID(c.Param("id"))
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	rm, err := h.repo.FindByID(c.Request.Context(), id)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "room not found"})
+		return
+	}
+	if rm.OwnerID == uid {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80050, "message": "cannot report your own room"})
+		return
+	}
+	var req reportReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "invalid body"})
+		return
+	}
+	// Whitelist reasons so the column stays enum-shaped.
+	switch req.Reason {
+	case "nsfw", "violence", "politics", "gambling", "fraud", "other":
+	default:
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80051, "message": "invalid reason"})
+		return
+	}
+	if len(req.Note) > 1000 {
+		req.Note = req.Note[:1000]
+	}
+	// Format the thumbnail URL the same way the admin client expects;
+	// hlsURL has been set from LIVE_HLS_URL at boot (e.g.
+	// "https://live.dfchat.chat/hls") so swap /hls/ → /thumbs/ and use
+	// .jpg. If the file isn't there yet the admin queue degrades to
+	// the room cover_url.
+	thumbURL := strings.Replace(strings.TrimRight(h.hlsURL, "/"), "/hls", "/thumbs", 1) +
+		"/" + rm.StreamKey + ".jpg"
+	if err := h.repo.InsertReport(c.Request.Context(), id, &uid, req.Reason, req.Note, thumbURL); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (h *Handler) banUser(c *gin.Context) {

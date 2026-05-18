@@ -99,7 +99,7 @@ func main() {
 	messageHandler := message.NewHandler(messageRepo, friendRepo, groupRepo, channelRepo, issuer, bus)
 	syncHandler := sync.NewHandler(pool, issuer)
 	fileHandler := file.NewHandler(fileRepo, storageClient, issuer)
-	adminHandler := admin.NewHandler(pool, issuer, auditor)
+	adminHandler := admin.NewHandler(pool, issuer, auditor, liveRepo, cfg.LiveHLSURL)
 	searchHandler := search.NewHandler(pool, issuer)
 	liveHandler := live.NewHandler(liveRepo, issuer, bus, cfg.LiveRTMPURL, cfg.LiveHLSURL, cfg.LiveSRSSecret, cfg.SRSInternalHTTP)
 	// relayAdapter implements realtime.RelayBackend: a relay (WebRTC

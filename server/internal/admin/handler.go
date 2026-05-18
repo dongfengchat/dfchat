@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strconv"
+	"strings"
 
 	authdomain "github.com/dongfang/dfchat/server/internal/auth"
+	"github.com/dongfang/dfchat/server/internal/live"
 	"github.com/dongfang/dfchat/server/pkg/audit"
 	"github.com/dongfang/dfchat/server/pkg/auth"
 	"github.com/dongfang/dfchat/server/pkg/middleware"
@@ -15,13 +17,15 @@ import (
 )
 
 type Handler struct {
-	pool   *pgxpool.Pool
-	issuer *auth.Issuer
-	audit  *audit.Logger
+	pool       *pgxpool.Pool
+	issuer     *auth.Issuer
+	audit      *audit.Logger
+	liveRepo   *live.Repo
+	liveHLSURL string // public HLS base, used to derive thumbnail URLs
 }
 
-func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer, auditor *audit.Logger) *Handler {
-	return &Handler{pool: pool, issuer: issuer, audit: auditor}
+func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer, auditor *audit.Logger, liveRepo *live.Repo, liveHLSURL string) *Handler {
+	return &Handler{pool: pool, issuer: issuer, audit: auditor, liveRepo: liveRepo, liveHLSURL: liveHLSURL}
 }
 
 func (h *Handler) Register(rg *gin.RouterGroup) {
@@ -43,6 +47,11 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	g.POST("/live/rooms/:id/force-end", h.forceEndLive)
 	g.PATCH("/live/rooms/:id/ban", h.banLiveRoom)
 	g.DELETE("/live/rooms/:id", h.adminDeleteLiveRoom)
+
+	// User reports queue + patrol grid (status=1 only, with thumbnail).
+	g.GET("/live/reports", h.listLiveReports)
+	g.POST("/live/reports/:id/resolve", h.resolveLiveReport)
+	g.GET("/live/patrol", h.livePatrol)
 }
 
 func (h *Handler) requireAdmin(c *gin.Context) {
@@ -689,4 +698,123 @@ func genRandomHex(nBytes int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ============================================================
+// Live reports + patrol — Tier-1 content moderation surface.
+// listLiveReports returns the queue (default status=0 pending).
+// resolveLiveReport closes a report with an optional action.
+// livePatrol returns all currently-broadcasting rooms with a
+// thumbnail URL pointing at server02's /thumbs/<key>.jpg, so
+// the admin can eyeball every concurrent stream from one grid.
+// ============================================================
+
+func (h *Handler) listLiveReports(c *gin.Context) {
+	status := int16(0)
+	if s := c.Query("status"); s != "" {
+		v, err := strconv.Atoi(s)
+		if err != nil || v < 0 || v > 2 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "bad status"})
+			return
+		}
+		status = int16(v)
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	rows, err := h.liveRepo.ListReports(c.Request.Context(), status, limit)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	// Also surface the pending count so the admin UI can render the
+	// "N 待审" badge without a follow-up call.
+	pending, _ := h.liveRepo.PendingReportCount(c.Request.Context())
+	c.JSON(http.StatusOK, gin.H{"reports": rows, "pending": pending})
+}
+
+type resolveReportReq struct {
+	// 1 = handled (we did something), 2 = dismissed (no action).
+	Status int16 `json:"status"`
+	// What the admin did. Free-form for now; the UI offers buttons
+	// for "强制结束 / 封禁主播 / 删除房间 / 无需处置" that map to
+	// the audit-style strings below.
+	Action string `json:"action"`
+}
+
+func (h *Handler) resolveLiveReport(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	var req resolveReportReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "invalid body"})
+		return
+	}
+	if req.Status != 1 && req.Status != 2 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "status must be 1 or 2"})
+		return
+	}
+	if err := h.liveRepo.ResolveReport(c.Request.Context(), id, uid, req.Status, req.Action); err != nil {
+		// Either not found or already resolved — treat both as 404 so
+		// double-click on the resolve button doesn't error.
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "report not pending"})
+		return
+	}
+	if h.audit != nil {
+		h.audit.Write(c.Request.Context(), audit.Entry{
+			ActorID: uid, Action: "live.report.resolve",
+			TargetKind: "live_report", TargetID: id,
+			IP: c.ClientIP(), UserAgent: c.GetHeader("User-Agent"),
+			Metadata: map[string]any{"status": req.Status, "action": req.Action},
+		})
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// livePatrol returns all status=1 rooms (currently broadcasting) with
+// a thumbnail URL derived from LIVE_HLS_URL ("https://live.dfchat.chat/hls"
+// → "https://live.dfchat.chat/thumbs/<key>.jpg"). Front-end renders a
+// grid that auto-refreshes every 30 s so the admin can sweep every
+// active stream at once.
+type patrolRoom struct {
+	ID             int64  `json:"id,string"`
+	Title          string `json:"title"`
+	OwnerID        int64  `json:"ownerId,string"`
+	OwnerNickname  string `json:"ownerNickname"`
+	OwnerAccountNo string `json:"ownerAccountNo"`
+	ViewerCount    int    `json:"viewerCount"`
+	StartedAt      string `json:"startedAt,omitempty"`
+	ThumbnailURL   string `json:"thumbnailUrl"`
+}
+
+func (h *Handler) livePatrol(c *gin.Context) {
+	rows, err := h.pool.Query(c.Request.Context(), `
+		SELECT rm.id, rm.title, rm.owner_id, rm.viewer_count,
+		       COALESCE(rm.started_at::text,''),
+		       rm.stream_key,
+		       COALESCE(u.nickname,''), COALESCE(u.account_no,'')
+		  FROM live_rooms rm
+		  LEFT JOIN users u ON u.id = rm.owner_id
+		 WHERE rm.status = 1 AND rm.is_test = FALSE
+		 ORDER BY rm.started_at DESC NULLS LAST`)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	defer rows.Close()
+	base := strings.Replace(strings.TrimRight(h.liveHLSURL, "/"), "/hls", "/thumbs", 1)
+	out := make([]patrolRoom, 0)
+	for rows.Next() {
+		var pr patrolRoom
+		var key string
+		if err := rows.Scan(&pr.ID, &pr.Title, &pr.OwnerID, &pr.ViewerCount,
+			&pr.StartedAt, &key, &pr.OwnerNickname, &pr.OwnerAccountNo); err != nil {
+			continue
+		}
+		pr.ThumbnailURL = base + "/" + key + ".jpg"
+		out = append(out, pr)
+	}
+	c.JSON(http.StatusOK, gin.H{"rooms": out})
 }

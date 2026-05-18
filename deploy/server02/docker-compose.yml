@@ -28,18 +28,41 @@ services:
         sed "s|\$${LIVE_SRS_HOOK_URL}|$$LIVE_SRS_HOOK_URL|g" \
           /usr/local/srs/conf/dfchat.conf.tmpl \
           > /usr/local/srs/conf/dfchat.conf
-        # Background ts/m3u8 sweeper. SRS image has no wget/curl, so the
-        # earlier "ask the SRS HTTP API which streams are live" approach
-        # silently fell back to deleting everything (active="") — luckily
-        # the -mmin +60 filter saved us. New approach: rely on file mtime
-        # alone. SRS touches every HLS fragment as it writes, so anything
-        # untouched for >60 min is definitely from a dead stream. Simpler,
-        # works with zero external tools.
+        # Sweeper #1 — drop ts/m3u8 SRS forgot to clean up. SRS image
+        # has no wget/curl, so we rely on file mtime alone: anything
+        # untouched for >60 min is from a dead stream.
         (
           while sleep 1800; do
             find /usr/local/srs/objs/nginx/html/live -type f \
               \( -name '*.ts' -o -name '*.mp4' -o -name '*.m3u8' \) \
               -mmin +60 -delete 2>/dev/null
+          done
+        ) &
+        # Sweeper #2 — refresh /thumbs/<key>.jpg every 30 s for every
+        # actively-published stream. The admin "直播巡查" grid and the
+        # AI moderation worker both read from /thumbs/. SRS ships with
+        # ffmpeg under objs/ffmpeg/bin so no extra install needed.
+        # We snap the *latest* fragment (newest .ts) which is roughly
+        # "what was being broadcast 2-4 s ago". JPG quality 5 (low) +
+        # 640x360 keeps each file ~30 KB.
+        mkdir -p /usr/local/srs/objs/nginx/html/thumbs
+        (
+          while sleep 30; do
+            for m3u8 in /usr/local/srs/objs/nginx/html/live/*.m3u8; do
+              [ -f "$$m3u8" ] || continue
+              key=$$(basename "$$m3u8" .m3u8)
+              # Skip transcoded variants (none right now, but be safe).
+              case "$$key" in *_ld) continue ;; esac
+              # Most-recent ts segment for this stream key.
+              latest=$$(ls -1t /usr/local/srs/objs/nginx/html/live/$$key-*.ts 2>/dev/null | head -1)
+              [ -n "$$latest" ] || continue
+              ./objs/ffmpeg/bin/ffmpeg -loglevel error -y \
+                -ss 1 -i "$$latest" \
+                -frames:v 1 -vf scale=640:360 -q:v 5 \
+                /usr/local/srs/objs/nginx/html/thumbs/$$key.jpg 2>/dev/null || true
+            done
+            # Drop orphan thumbs whose m3u8 is gone (stream ended).
+            find /usr/local/srs/objs/nginx/html/thumbs -type f -name '*.jpg' -mmin +5 -delete 2>/dev/null
           done
         ) &
         exec ./objs/srs -c conf/dfchat.conf

@@ -29,10 +29,13 @@ import {
   adminForceEndLive,
   adminForceLogoutUser,
   adminGrantPremiumNumber,
+  adminListLiveReports,
+  adminListLivePatrol,
   adminListLiveRooms,
   adminListPremiumNumbers,
   adminListUsers,
   adminReleasePremiumNumber,
+  adminResolveLiveReport,
   adminSetUserStatus,
   adminStats,
   adminUserLogins,
@@ -41,6 +44,8 @@ import {
   type AdminSegmentStat,
   type AdminStats,
   type AdminUser,
+  type LiveReport,
+  type LivePatrolRoom,
   type LoginLogEntry,
 } from '@/api/client';
 import { useUserStore } from '@/store/userStore';
@@ -464,7 +469,65 @@ function UserDetailsModal({
   );
 }
 
+// Sub-tabs inside the Admin Live panel. "房间管理" is the original
+// room CRUD view; "举报队列" / "实时巡查" are the Tier-1 content-
+// moderation surfaces. Kept inside the same outer tab so the
+// "report processed → bump room status" actions can co-exist with
+// the regular room admin without a second page navigation.
+type LiveSubTab = 'rooms' | 'reports' | 'patrol';
+
 function LiveAdminPanel() {
+  const [subTab, setSubTab] = useState<LiveSubTab>('rooms');
+  const [pendingCount, setPendingCount] = useState<number>(0);
+
+  // Pull pending-count on mount + every 30 s so the "举报队列 (N)"
+  // badge stays fresh even when the admin is sitting on another tab.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      adminListLiveReports(0)
+        .then((r) => { if (!cancelled) setPendingCount(r.pending); })
+        .catch(() => { /* silent */ });
+    };
+    tick();
+    const id = window.setInterval(tick, 30_000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, []);
+
+  return (
+    <section className="px-6 pb-6 pt-4">
+      <div className="flex items-center gap-2 mb-3 border-b border-bg-5/40">
+        {([
+          { v: 'rooms',   label: '房间管理' },
+          { v: 'reports', label: `举报队列${pendingCount > 0 ? ` · ${pendingCount}` : ''}` },
+          { v: 'patrol',  label: '实时巡查' },
+        ] as const).map((opt) => (
+          <button
+            key={opt.v}
+            onClick={() => setSubTab(opt.v as LiveSubTab)}
+            className={`px-3 py-2 text-sm transition-colors -mb-px ${
+              subTab === opt.v
+                ? 'text-ink-1 border-b-2 border-brand-500'
+                : 'text-ink-3 hover:text-ink-1 border-b-2 border-transparent'
+            }`}
+          >
+            {opt.label}
+            {opt.v === 'reports' && pendingCount > 0 && (
+              <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-accent-red text-white text-[10px]">
+                {pendingCount > 9 ? '9+' : pendingCount}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+      {subTab === 'rooms'   && <LiveRoomsPanel />}
+      {subTab === 'reports' && <LiveReportsPanel onResolved={() => setPendingCount((c) => Math.max(0, c - 1))} />}
+      {subTab === 'patrol'  && <LivePatrolPanel />}
+    </section>
+  );
+}
+
+function LiveRoomsPanel() {
   const [rooms, setRooms] = useState<AdminLiveRoom[] | null>(null);
   const [filter, setFilter] = useState<'' | 'live' | 'ended' | 'banned'>('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -499,9 +562,8 @@ function LiveAdminPanel() {
   }
 
   return (
-    <section className="px-6 pb-6 pt-4">
+    <div>
       <div className="flex items-center gap-3 mb-3">
-        <h2 className="text-base font-semibold">直播间管理</h2>
         <div className="ml-auto flex gap-1.5 text-xs">
           {([
             { v: '', label: '全部' },
@@ -609,7 +671,220 @@ function LiveAdminPanel() {
           </tbody>
         </table>
       </div>
-    </section>
+    </div>
+  );
+}
+
+// LiveReportsPanel — pending user reports + AI-system reports.
+// onResolved bumps the parent's pending-count badge optimistically
+// so the UI doesn't have to wait for the next 30 s tick.
+function LiveReportsPanel({ onResolved }: { onResolved: () => void }) {
+  const [statusFilter, setStatusFilter] = useState<0 | 1 | 2>(0);
+  const [items, setItems] = useState<LiveReport[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function refresh() {
+    try { const r = await adminListLiveReports(statusFilter); setItems(r.reports); }
+    catch (e: any) { toast(e.message ?? '加载失败', 'error'); }
+  }
+  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [statusFilter]);
+
+  async function resolve(id: string, status: 1 | 2, action: string, then?: () => Promise<void>) {
+    setBusy(id);
+    try {
+      if (then) await then();
+      await adminResolveLiveReport(id, status, action);
+      toast(status === 1 ? '已处置' : '已驳回', 'success');
+      if (statusFilter === 0) onResolved();
+      await refresh();
+    } catch (e: any) {
+      toast(e.message ?? '操作失败', 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const reasonLabel: Record<string, string> = {
+    nsfw: '色情', violence: '暴力', politics: '政治敏感',
+    gambling: '赌博', fraud: '诈骗', other: '其他',
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <div className="ml-auto flex gap-1.5 text-xs">
+          {([
+            { v: 0, label: '待审' },
+            { v: 1, label: '已处置' },
+            { v: 2, label: '已驳回' },
+          ] as const).map((opt) => (
+            <button
+              key={opt.v}
+              onClick={() => setStatusFilter(opt.v as 0|1|2)}
+              className={`px-3 py-1 rounded-full transition-colors ${
+                statusFilter === opt.v ? 'bg-brand-500 text-white' : 'bg-bg-3 text-ink-2 hover:bg-bg-4'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {!items && <div className="text-ink-4 text-sm py-10 text-center">加载中…</div>}
+      {items && items.length === 0 && (
+        <div className="text-ink-4 text-sm py-10 text-center">没有举报</div>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {items?.map((r) => {
+          const isBusy = busy === r.id;
+          const thumb = r.thumbnailUrl || r.roomCoverUrl || '';
+          return (
+            <div key={r.id} className="card p-3 flex gap-3">
+              {/* Thumbnail evidence — falls back to room cover, then a stock icon. */}
+              <div className="w-32 h-20 shrink-0 bg-bg-3 rounded overflow-hidden flex items-center justify-center">
+                {thumb ? (
+                  <img
+                    src={thumb}
+                    className="w-full h-full object-cover"
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                    alt=""
+                  />
+                ) : (
+                  <Ban size={18} className="text-ink-4" />
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[11px] px-1.5 py-0.5 rounded bg-accent-red/15 text-accent-red font-medium">
+                    {reasonLabel[r.reason] || r.reason}
+                  </span>
+                  <span className="text-sm font-medium text-ink-1 truncate">{r.roomTitle ?? '(未命名)'}</span>
+                  <span className="text-[11px] text-ink-4">#{r.roomId}</span>
+                  {r.roomStatus === 1 && (
+                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-accent-red/15 text-accent-red inline-flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-accent-red animate-pulse" /> 仍在播
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] text-ink-3 mt-1 truncate">
+                  主播 {r.ownerNickname || '—'} <span className="text-ink-4 font-mono">#{r.ownerAccountNo || '?'}</span>
+                  <span className="text-ink-4">  ·  </span>
+                  举报人 {r.reporterId
+                    ? <>{r.reporterNickname || '—'} <span className="text-ink-4 font-mono">#{r.reporterAccountNo || '?'}</span></>
+                    : <span className="text-brand-300">AI 系统</span>}
+                  <span className="text-ink-4">  ·  </span>
+                  {new Date(r.createdAt).toLocaleString('zh-CN', { hour12: false })}
+                </div>
+                {r.note && (
+                  <div className="text-xs text-ink-2 mt-1.5 bg-bg-3/60 rounded px-2 py-1 break-words">
+                    {r.note}
+                  </div>
+                )}
+                {r.status !== 0 && (
+                  <div className="text-[11px] text-ink-4 mt-1">
+                    {r.status === 1 ? '✓ 已处置' : '✗ 已驳回'}
+                    {r.actionTaken && <> · {r.actionTaken}</>}
+                    {r.reviewedAt && <> · {new Date(r.reviewedAt).toLocaleString('zh-CN', { hour12: false })}</>}
+                  </div>
+                )}
+                {r.status === 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {r.roomStatus === 1 && (
+                      <button
+                        disabled={isBusy}
+                        onClick={() => {
+                          if (!confirm(`强制下播「${r.roomTitle}」并标记已处置？`)) return;
+                          resolve(r.id, 1, 'force_ended', () => adminForceEndLive(r.roomId!));
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-accent-red/15 text-accent-red hover:bg-accent-red/25 text-xs"
+                      >
+                        <CircleOff size={11} /> 强制下播
+                      </button>
+                    )}
+                    <button
+                      disabled={isBusy}
+                      onClick={() => {
+                        if (!confirm(`封禁直播间「${r.roomTitle}」并标记已处置？`)) return;
+                        resolve(r.id, 1, 'banned_room', () => adminBanLiveRoom(r.roomId!, true, `举报${reasonLabel[r.reason] || r.reason}`));
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded bg-accent-amber/15 text-accent-amber hover:bg-accent-amber/25 text-xs"
+                    >
+                      <Ban size={11} /> 封禁房间
+                    </button>
+                    <button
+                      disabled={isBusy}
+                      onClick={() => resolve(r.id, 2, 'no_action')}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded bg-bg-3 text-ink-2 hover:bg-bg-4 text-xs"
+                    >
+                      驳回
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// LivePatrolPanel — grid of every currently-broadcasting room with
+// auto-refreshing thumbnail. Click a thumbnail to open the room in
+// the regular Live page popout. Renders nothing fancy: thumbnails
+// are 30 s stale by design (server-side capture cadence).
+function LivePatrolPanel() {
+  const [rooms, setRooms] = useState<LivePatrolRoom[] | null>(null);
+  const [tick, setTick] = useState(0); // cache-buster suffix
+
+  async function refresh() {
+    try { setRooms(await adminListLivePatrol()); }
+    catch (e: any) { toast(e.message ?? '加载失败', 'error'); }
+  }
+  useEffect(() => {
+    refresh();
+    const id = window.setInterval(() => { refresh(); setTick((n) => n + 1); }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  if (!rooms) return <div className="text-ink-4 text-sm py-10 text-center">加载中…</div>;
+  if (rooms.length === 0) {
+    return <div className="text-ink-4 text-sm py-10 text-center">当前没有直播</div>;
+  }
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+      {rooms.map((r) => (
+        <a
+          key={r.id}
+          href={`#/live/${r.id}?popout=1`}
+          target="_blank"
+          rel="noreferrer"
+          className="card overflow-hidden hover:border-brand-500/60 transition-colors"
+        >
+          <div className="aspect-video bg-bg-3 relative">
+            <img
+              src={`${r.thumbnailUrl}?t=${tick}`}
+              className="w-full h-full object-cover"
+              onError={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = '0.2'; }}
+              alt={r.title}
+            />
+            <span className="absolute top-1.5 left-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent-red text-white text-[10px] font-medium">
+              <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" /> LIVE
+            </span>
+            <span className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px]">
+              {r.viewerCount} 在线
+            </span>
+          </div>
+          <div className="p-2">
+            <div className="text-xs font-medium text-ink-1 truncate">{r.title}</div>
+            <div className="text-[10px] text-ink-4 truncate">
+              {r.ownerNickname || '—'} <span className="font-mono">#{r.ownerAccountNo || '?'}</span>
+            </div>
+          </div>
+        </a>
+      ))}
+    </div>
   );
 }
 

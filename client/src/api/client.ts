@@ -1009,6 +1009,78 @@ export async function adminDeleteLiveRoom(id: string): Promise<void> {
   try { await api.delete(`/api/v1/admin/live/rooms/${id}`); } catch (e) { throw unwrapError(e); }
 }
 
+// ===== Live room reports (Tier-1 content moderation) =====
+//
+// Viewers flag broadcasts → admin queue. The same surface is also
+// fed by the AI moderation worker (Phase B) — both producers, one
+// review queue.
+
+export type LiveReportReason = 'nsfw' | 'violence' | 'politics' | 'gambling' | 'fraud' | 'other';
+
+export interface LiveReport {
+  id: string;
+  roomId: string;
+  reporterId?: string;          // omitted for AI/system reports
+  reason: LiveReportReason;
+  note?: string;
+  thumbnailUrl?: string;
+  status: 0 | 1 | 2;            // 0 pending, 1 handled, 2 dismissed
+  reviewedBy?: string;
+  reviewedAt?: string;
+  actionTaken?: string;
+  createdAt: string;
+  // Joined snapshot — saves N+1 lookups in the admin queue.
+  roomTitle?: string;
+  roomOwnerId?: string;
+  roomStatus?: number;
+  roomCoverUrl?: string;
+  ownerNickname?: string;
+  ownerAccountNo?: string;
+  reporterNickname?: string;
+  reporterAccountNo?: string;
+}
+
+// Viewer-facing — report a room they're watching.
+export async function reportLiveRoom(roomId: string, reason: LiveReportReason, note?: string): Promise<void> {
+  try { await api.post(`/api/v1/live/rooms/${roomId}/report`, { reason, note }); } catch (e) { throw unwrapError(e); }
+}
+
+// Admin queue list. status 0 = pending, 1 = handled, 2 = dismissed.
+export async function adminListLiveReports(status: 0 | 1 | 2 = 0): Promise<{ reports: LiveReport[]; pending: number }> {
+  try {
+    const res = await api.get<{ reports: LiveReport[]; pending: number }>(
+      '/api/v1/admin/live/reports', { params: { status } });
+    return { reports: res.data.reports ?? [], pending: res.data.pending ?? 0 };
+  } catch (e) { throw unwrapError(e); }
+}
+
+// Admin closes a report. status=1 means "I took action"; action is
+// a free-form tag describing what — see resolveReportReq on the server.
+export async function adminResolveLiveReport(id: string, status: 1 | 2, action: string): Promise<void> {
+  try { await api.post(`/api/v1/admin/live/reports/${id}/resolve`, { status, action }); } catch (e) { throw unwrapError(e); }
+}
+
+// Patrol grid — all status=1 rooms with thumbnail URL. Front-end
+// auto-refreshes every 30 s so the admin can scan every in-flight
+// stream at once.
+export interface LivePatrolRoom {
+  id: string;
+  title: string;
+  ownerId: string;
+  ownerNickname: string;
+  ownerAccountNo: string;
+  viewerCount: number;
+  startedAt?: string;
+  thumbnailUrl: string;
+}
+
+export async function adminListLivePatrol(): Promise<LivePatrolRoom[]> {
+  try {
+    const res = await api.get<{ rooms: LivePatrolRoom[] }>('/api/v1/admin/live/patrol');
+    return res.data.rooms ?? [];
+  } catch (e) { throw unwrapError(e); }
+}
+
 export function channelConvId(channelId: string): string {
   return `c_${channelId}`;
 }
