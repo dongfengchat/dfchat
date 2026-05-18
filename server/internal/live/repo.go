@@ -713,9 +713,37 @@ type Danmaku struct {
 	ID        int64     `json:"id,string"`
 	RoomID    int64     `json:"roomId,string"`
 	SenderID  int64     `json:"senderId,string"`
-	Content   string    `json:"text"`
-	Color     string    `json:"color,omitempty"`
-	CreatedAt time.Time `json:"ts"`
+	// SenderNickname + SenderAccountNo: looked up from users at SELECT
+	// time so the client can render "<昵称> #<账号>" in the chat side
+	// panel without making N follow-up lookups. Both can be empty if
+	// the sender's account has been deleted (FK is ON DELETE SET NULL
+	// in some places but here we LEFT JOIN to survive).
+	SenderNickname  string    `json:"senderNickname,omitempty"`
+	SenderAccountNo string    `json:"senderAccountNo,omitempty"`
+	Content         string    `json:"text"`
+	Color           string    `json:"color,omitempty"`
+	CreatedAt       time.Time `json:"ts"`
+}
+
+// UserDisplay returns the public-facing identifiers for a user: their
+// chosen nickname and their stable account number (the one rendered as
+// "#123456" in the UI). Used by the realtime danmaku broadcast path so
+// each WS event arrives already labeled — no client-side lookup needed.
+//
+// LEFT-JOIN-shaped via separate SELECT: if the row's gone the caller
+// gets empty strings rather than ErrNotFound; danmaku from deleted
+// accounts should still render, just without a name.
+func (r *Repo) UserDisplay(ctx context.Context, userID int64) (nickname, accountNo string, err error) {
+	row := r.pool.QueryRow(ctx,
+		`SELECT COALESCE(nickname,''), COALESCE(account_no,'') FROM users WHERE id = $1`,
+		userID)
+	if err = row.Scan(&nickname, &accountNo); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", nil
+		}
+		return "", "", err
+	}
+	return
 }
 
 func (r *Repo) InsertDanmaku(ctx context.Context, roomID, senderID int64, content, color string) error {
@@ -728,18 +756,24 @@ func (r *Repo) InsertDanmaku(ctx context.Context, roomID, senderID int64, conten
 
 // RecentDanmaku returns up to `limit` newest danmaku for a room, in
 // chronological (oldest-first) order so the client can append them
-// directly to its render buffer.
+// directly to its render buffer. LEFT JOIN users so deleted accounts
+// don't drop their historical danmaku from the recap; instead they
+// render as a danmaku with no nickname/accountNo (caller decides how
+// to show it — currently just shows blank name).
 func (r *Repo) RecentDanmaku(ctx context.Context, roomID int64, limit int) ([]Danmaku, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, room_id, sender_id, content, COALESCE(color,''), created_at
-		 FROM (
-		   SELECT id, room_id, sender_id, content, color, created_at
-		   FROM live_danmaku WHERE room_id = $1
-		   ORDER BY created_at DESC LIMIT $2
-		 ) t ORDER BY created_at ASC`, roomID, limit)
+		`SELECT t.id, t.room_id, t.sender_id, t.content, COALESCE(t.color,''), t.created_at,
+		        COALESCE(u.nickname,''), COALESCE(u.account_no,'')
+		   FROM (
+		     SELECT id, room_id, sender_id, content, color, created_at
+		       FROM live_danmaku WHERE room_id = $1
+		       ORDER BY created_at DESC LIMIT $2
+		   ) t
+		   LEFT JOIN users u ON u.id = t.sender_id
+		  ORDER BY t.created_at ASC`, roomID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -747,7 +781,8 @@ func (r *Repo) RecentDanmaku(ctx context.Context, roomID int64, limit int) ([]Da
 	out := make([]Danmaku, 0)
 	for rows.Next() {
 		var d Danmaku
-		if err := rows.Scan(&d.ID, &d.RoomID, &d.SenderID, &d.Content, &d.Color, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.RoomID, &d.SenderID, &d.Content, &d.Color, &d.CreatedAt,
+			&d.SenderNickname, &d.SenderAccountNo); err != nil {
 			return nil, err
 		}
 		out = append(out, d)

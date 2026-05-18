@@ -535,6 +535,8 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
           text: d.text,
           color: d.color,
           senderId: d.senderId,
+          senderNickname: d.senderNickname,
+          senderAccountNo: d.senderAccountNo,
           ts: new Date(d.ts).getTime(),
         })));
       })
@@ -643,11 +645,17 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
       return;
     }
     // Server skips echo to the sender to avoid dupes; render ours locally.
+    // We populate senderNickname / senderAccountNo from `me` so the
+    // local echo shows the same "<昵称> #<账号>" label format as
+    // server-broadcast entries — otherwise our own messages would
+    // render nameless in our own chat panel.
     setDanmaku((cur) => [...cur, {
       roomId: room.id,
       text: t,
       color: myColor,
       senderId: me.id,
+      senderNickname: me.nickname,
+      senderAccountNo: me.accountNo,
       ts: Date.now(),
     }]);
     setText('');
@@ -1162,11 +1170,34 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
                     <Crown size={9} /> 主播
                   </span>
                 )}
-                <span
-                  className={`flex-1 min-w-0 break-words ${isHost ? 'text-amber-200 font-medium' : 'text-ink-2'}`}
-                  style={d.color && !isHost ? { color: d.color } : undefined}
-                >
-                  {d.text}
+                <span className="flex-1 min-w-0 break-words">
+                  {/* Sender label: "<昵称> #<账号>". Truncate nickname
+                      to keep one-line layout; account number is the
+                      stable identifier for "different people, same
+                      nickname" disambiguation. Falls back to "已注销"
+                      when the account is gone or to the raw senderId
+                      for locally-echoed messages that arrived before
+                      the WS round-trip filled the label in. */}
+                  <span
+                    title={d.senderAccountNo ? `账号 #${d.senderAccountNo}` : undefined}
+                    className={`mr-1.5 text-[11px] inline-flex items-center gap-0.5 align-baseline ${
+                      isHost ? 'text-amber-300 font-medium' : 'text-ink-3'
+                    }`}
+                  >
+                    <span className="max-w-[7em] truncate inline-block align-bottom">
+                      {d.senderNickname || (d.senderId === me?.id ? me?.nickname : '') || '已注销'}
+                    </span>
+                    {d.senderAccountNo && (
+                      <span className="text-ink-4 font-mono">#{d.senderAccountNo}</span>
+                    )}
+                    <span className="text-ink-4">:</span>
+                  </span>
+                  <span
+                    className={isHost ? 'text-amber-200 font-medium' : 'text-ink-2'}
+                    style={d.color && !isHost ? { color: d.color } : undefined}
+                  >
+                    {d.text}
+                  </span>
                 </span>
                 {isOwner && (
                   <button

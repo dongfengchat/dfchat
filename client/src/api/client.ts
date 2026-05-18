@@ -524,6 +524,11 @@ export interface LiveDanmakuApiItem {
   id: string;
   roomId: string;
   senderId: string;
+  // Server populates these by LEFT JOIN on users at SELECT time so the
+  // chat side-panel can render "<昵称> #<账号>" without a follow-up
+  // lookup. Empty when the sender's account has been deleted.
+  senderNickname?: string;
+  senderAccountNo?: string;
   text: string;
   color?: string;
   ts: string;

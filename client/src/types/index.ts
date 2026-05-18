@@ -50,6 +50,11 @@ export interface LiveDanmakuItem {
   id: string;
   roomId: string;
   senderId: string;
+  // Sender's nickname + public account_no, captured at SELECT time by
+  // the server's RecentDanmaku JOIN. Both can be empty if the sender's
+  // account has been deleted — client renders blank name in that case.
+  senderNickname?: string;
+  senderAccountNo?: string;
   text: string;
   color?: string;
   ts: string;       // ISO timestamp from server
@@ -66,6 +71,14 @@ export interface DanmakuEvent {
   text: string;
   color?: string;
   senderId: string;
+  // Display labels for the chat side-panel. Populated server-side on
+  // each broadcast (live.danmaku.recv) so clients can render
+  // "<昵称> #<账号>" without a follow-up REST lookup per message.
+  // Optional because messages from a since-deleted account, or
+  // locally-echoed danmaku rendered before the WS round-trip, may
+  // not have them.
+  senderNickname?: string;
+  senderAccountNo?: string;
   ts: number;
 }
 

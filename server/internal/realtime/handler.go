@@ -34,6 +34,12 @@ type LiveBackend interface {
 	// has chat_subscribers_only=true so the common case is a no-op.
 	ChatSettings(ctx context.Context, roomID int64) (slowSeconds int, subscribersOnly bool, ownerID int64, err error)
 	IsFollowing(ctx context.Context, roomID, userID int64) (bool, error)
+	// UserDisplay returns the sender's nickname + account_no so the
+	// danmaku WS event can ship pre-labeled — clients render names
+	// in the chat side-panel without a follow-up REST lookup per
+	// message. Hit once per danmaku send; if it errors or returns
+	// empty, broadcast still proceeds with just the senderId.
+	UserDisplay(ctx context.Context, userID int64) (nickname, accountNo string, err error)
 }
 
 // RelayBackend gates peer-to-peer WS-relayed messages (WebRTC signaling
@@ -558,12 +564,26 @@ func (h *Handler) handleLiveDanmaku(userID int64, env clientEnvelope) {
 	targets := h.snapshotSubsLocked(p.RoomID)
 	h.liveMu.Unlock()
 
+	// Pre-label the broadcast with the sender's display name so every
+	// recipient renders "<nickname> #<accountNo>" without a per-event
+	// REST roundtrip. Lookup is a single users.id PK fetch — cheap.
+	// Failure isn't fatal: drop to senderId-only labeling so the
+	// danmaku still shows up.
+	var senderNick, senderAcct string
+	if h.live != nil {
+		if n, a, err := h.live.UserDisplay(context.Background(), userID); err == nil {
+			senderNick, senderAcct = n, a
+		}
+	}
+
 	payload := map[string]any{
-		"roomId":   p.RoomID,
-		"text":     text,
-		"color":    p.Color,
-		"senderId": fmt.Sprintf("%d", userID),
-		"ts":       time.Now().UnixMilli(),
+		"roomId":          p.RoomID,
+		"text":            text,
+		"color":           p.Color,
+		"senderId":        fmt.Sprintf("%d", userID),
+		"senderNickname":  senderNick,
+		"senderAccountNo": senderAcct,
+		"ts":              time.Now().UnixMilli(),
 	}
 	for _, uid := range targets {
 		if uid == userID {
