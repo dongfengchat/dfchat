@@ -392,11 +392,14 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
   const [liveRoom, setLiveRoom] = useState<LiveRoom>(room);
   const [buffering, setBuffering] = useState(false);
   // Quality picker: 'ld' = 480p transcoded (smooth), 'src' = host's original
-  // upload (could be 1080p). Default 'ld' to save bandwidth — switching to
-  // 'src' triggers a one-time consent dialog.
-  const [quality, setQuality] = useState<'ld' | 'src'>('ld');
+  // upload (could be 1080p). The 480p transcode is currently disabled in
+  // SRS (see deploy/server02/srs.conf — recursion bug). Default is 'src'
+  // and the picker is hidden until transcode comes back.
+  const [quality, setQuality] = useState<'ld' | 'src'>('src');
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [showHDConsent, setShowHDConsent] = useState(false);
+  // Feature flag — flip to true once SRS transcode is fixed end-to-end.
+  const QUALITY_PICKER_ENABLED = false;
   const [inPiP, setInPiP] = useState(false);
   // Player-level error surface — replaces a black/buffering video with a
   // human-readable card. Cleared on a successful MANIFEST_LOADED.
@@ -928,6 +931,7 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
 
           {/* Top-right toolbar: quality + PiP + screenshot. */}
           <div className="absolute top-2 right-2 flex gap-1.5 z-20">
+              {QUALITY_PICKER_ENABLED && (
               <div className="relative">
                 <button
                   onClick={() => setShowQualityMenu((v) => !v)}
@@ -953,6 +957,7 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
                   </div>
                 )}
               </div>
+              )}
               <button
                 onClick={togglePiP}
                 className={`p-1.5 rounded text-white text-xs ${inPiP ? 'bg-brand-500' : 'bg-black/55 hover:bg-black/75'}`}

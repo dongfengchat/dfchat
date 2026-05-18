@@ -399,11 +399,24 @@ func (r *Repo) TryClaimPublisher(ctx context.Context, streamKey, clientID string
 	if err != nil {
 		return false, nil, err
 	}
+	// Status condition: allow the claim if the slot is free, OR this
+	// is the same client reconnecting, OR the row is currently
+	// status=2 (ended — previous broadcast is over, so no contention
+	// with another live publisher even if the binding lingers). The
+	// status=2 case matters because on_unpublish leaves the row in
+	// (status=2, current_publish_client_id NULL) but a row that was
+	// already status=2 when a new publisher arrives might still have
+	// a stale binding from before — without this clause OBS could
+	// never restart broadcast on the same key.
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE live_rooms
 		   SET current_publish_client_id = $2
 		 WHERE id = $1
-		   AND (current_publish_client_id IS NULL OR current_publish_client_id = $2)`,
+		   AND (
+		         current_publish_client_id IS NULL
+		         OR current_publish_client_id = $2
+		         OR status = 2
+		       )`,
 		rm.ID, clientID)
 	if err != nil {
 		return false, rm, err
@@ -451,31 +464,66 @@ func (r *Repo) ReleasePublisher(ctx context.Context, roomID int64) (string, erro
 // key cleanly; only genuinely abandoned streams get their keys
 // rotated (closing the takeover-by-leaked-HLS-URL window).
 //
+// Implementation: SELECT candidates, then per-row UPDATE with a
+// Go-generated key. We avoid the obvious single-statement form
+// (encode(gen_random_bytes(...))) because gen_random_bytes lives in
+// the pgcrypto extension which isn't enabled on this DB, and adding
+// it requires CREATE EXTENSION privilege the dfchat user lacks. The
+// candidate set is tiny (at most "rooms that ended in the last hour
+// or two on a busy day"), so the per-row cost is negligible.
+//
 // Returns the IDs that were rotated for logging.
 func (r *Repo) RotateAbandonedStreamKeys(ctx context.Context, maxIdle time.Duration) ([]int64, error) {
 	threshold := time.Now().Add(-maxIdle)
 	rows, err := r.pool.Query(ctx, `
-		UPDATE live_rooms
-		   SET stream_key           = encode(gen_random_bytes(16), 'hex'),
-		       last_key_rotation_at = now()
+		SELECT id FROM live_rooms
 		 WHERE status = 2
 		   AND ended_at IS NOT NULL
 		   AND ended_at < $1
-		   AND (last_key_rotation_at IS NULL OR last_key_rotation_at < ended_at)
-		RETURNING id`, threshold)
+		   AND (last_key_rotation_at IS NULL OR last_key_rotation_at < ended_at)`,
+		threshold)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var ids []int64
+	var candidates []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			return ids, err
+			rows.Close()
+			return nil, err
 		}
-		ids = append(ids, id)
+		candidates = append(candidates, id)
 	}
-	return ids, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rotated := make([]int64, 0, len(candidates))
+	for _, id := range candidates {
+		newKey, err := genStreamKey()
+		if err != nil {
+			return rotated, err
+		}
+		// Re-check the rotation guard in the WHERE so a concurrent
+		// owner-side rotate that happens between our SELECT and this
+		// UPDATE doesn't get clobbered. Idempotent if the row no
+		// longer matches.
+		tag, err := r.pool.Exec(ctx, `
+			UPDATE live_rooms
+			   SET stream_key           = $2,
+			       last_key_rotation_at = now()
+			 WHERE id = $1
+			   AND status = 2
+			   AND (last_key_rotation_at IS NULL OR last_key_rotation_at < ended_at)`,
+			id, newKey)
+		if err != nil {
+			return rotated, err
+		}
+		if tag.RowsAffected() == 1 {
+			rotated = append(rotated, id)
+		}
+	}
+	return rotated, nil
 }
 
 // BumpDanmaku is the +1 counter for total_danmaku, used by the
