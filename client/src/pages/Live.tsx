@@ -1171,25 +1171,20 @@ function Watch({ room, onBack }: { room: LiveRoom; onBack: () => void }) {
                   </span>
                 )}
                 <span className="flex-1 min-w-0 break-words">
-                  {/* Sender label: "<昵称> #<账号>". Truncate nickname
-                      to keep one-line layout; account number is the
-                      stable identifier for "different people, same
-                      nickname" disambiguation. Falls back to "已注销"
-                      when the account is gone or to the raw senderId
-                      for locally-echoed messages that arrived before
-                      the WS round-trip filled the label in. */}
+                  {/* Sender label: just "<昵称>" inline — account number
+                      lives in the title attribute (hover) so the line
+                      stays short. The accountNo is still authoritatively
+                      identifying for "two viewers with the same
+                      nickname" disambiguation, just out-of-the-way. */}
                   <span
                     title={d.senderAccountNo ? `账号 #${d.senderAccountNo}` : undefined}
                     className={`mr-1.5 text-[11px] inline-flex items-center gap-0.5 align-baseline ${
                       isHost ? 'text-amber-300 font-medium' : 'text-ink-3'
                     }`}
                   >
-                    <span className="max-w-[7em] truncate inline-block align-bottom">
+                    <span className="max-w-[8em] truncate inline-block align-bottom">
                       {d.senderNickname || (d.senderId === me?.id ? me?.nickname : '') || '已注销'}
                     </span>
-                    {d.senderAccountNo && (
-                      <span className="text-ink-4 font-mono">#{d.senderAccountNo}</span>
-                    )}
                     <span className="text-ink-4">:</span>
                   </span>
                   <span
