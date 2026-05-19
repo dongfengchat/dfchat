@@ -44,6 +44,11 @@ export interface LiveRoom {
   pinnedDanmakuSender?: string;
   pinnedDanmakuColor?: string;
   pinnedDanmakuAt?: string; // ISO timestamp
+
+  // Admin-set ban reason. Surfaced in Studio when status=3 so the
+  // streamer sees why they can't broadcast. Empty/missing on rooms
+  // that have never been banned.
+  bannedReason?: string;
 }
 
 export interface LiveDanmakuItem {

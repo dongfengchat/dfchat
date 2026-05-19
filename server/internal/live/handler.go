@@ -468,6 +468,46 @@ func (h *Handler) stopLive(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// NotifyOwnerBanned pushes a `live.room.banned` event to the owner's
+// WS connection. The Studio UI shows a banner + reason on receipt;
+// if the owner is offline, the banner appears when they next open
+// Studio (banned_reason is persisted on the room row).
+func (h *Handler) NotifyOwnerBanned(_ context.Context, ownerID, roomID int64, reason string) {
+	if h.bus == nil {
+		return
+	}
+	h.bus.Publish(ownerID, wsbus.Event{
+		Type: "live.room.banned",
+		Payload: map[string]any{
+			"roomId": strconv.FormatInt(roomID, 10),
+			"reason": reason,
+		},
+	})
+}
+
+// NotifyOwnerUnbanned mirrors NotifyOwnerBanned for the un-ban path.
+// Streamer's Studio drops the banner when this arrives.
+func (h *Handler) NotifyOwnerUnbanned(_ context.Context, roomID int64) {
+	if h.bus == nil {
+		return
+	}
+	// We don't carry ownerID through unban path here — the client
+	// matches by roomId. Broadcasting to the owner only would
+	// require an extra DB lookup. Instead we publish via roomId's
+	// existing subscriber set (viewers) — though that includes
+	// non-owners, the event payload makes intent clear and any
+	// non-owner client ignores it (Studio is owner-only UI).
+	if h.viewers == nil {
+		return
+	}
+	for _, uid := range h.viewers.LiveViewerIDs(strconv.FormatInt(roomID, 10)) {
+		h.bus.Publish(uid, wsbus.Event{
+			Type: "live.room.unbanned",
+			Payload: map[string]any{"roomId": strconv.FormatInt(roomID, 10)},
+		})
+	}
+}
+
 // EndRoom is the shared "this broadcast is over, tear it down" helper.
 // Sequence:
 //   1. SetEnded (status → 2, finalize stats)
@@ -494,6 +534,11 @@ func (h *Handler) EndRoom(ctx context.Context, rm *Room) {
 func (h *Handler) endRoom(ctx context.Context, rm *Room) {
 	_ = h.repo.SetEnded(ctx, rm.ID)
 	_, _ = h.repo.ReleasePublisher(ctx, rm.ID)
+	// Clear the adaptive review state so the next broadcast starts
+	// fresh on the 60-second base interval — otherwise a long-clean
+	// previous session would carry its 15-min interval into the
+	// new broadcast and miss early violations.
+	_ = h.repo.ResetReviewSchedule(ctx, rm.ID)
 	if h.bus != nil {
 		h.broadcastRoomDeleted(ctx, rm.ID)
 		if !rm.IsTest {
@@ -711,6 +756,14 @@ func (h *Handler) srsHook(c *gin.Context) {
 
 	switch p.Action {
 	case "on_publish":
+		// Look up room BEFORE claiming so we can short-circuit on
+		// status=3 (banned) — the room is barred from broadcasting
+		// regardless of who has the key.
+		preCheck, lerr := h.repo.FindByStreamKey(c.Request.Context(), p.Stream)
+		if lerr == nil && preCheck != nil && preCheck.Status == StatusBanned {
+			c.String(http.StatusForbidden, "1")
+			return
+		}
 		// Atomically bind the stream key to this SRS client_id. If the
 		// slot is already taken by another client we reject — second
 		// publisher with a leaked key gets "publisher already active".
@@ -737,6 +790,10 @@ func (h *Handler) srsHook(c *gin.Context) {
 			c.String(http.StatusOK, "0")
 			return
 		}
+		// Reset the moderation review schedule so the next broadcast
+		// starts on the 60-s base interval, not whatever interval
+		// this session had drifted to.
+		_ = h.repo.ResetReviewSchedule(c.Request.Context(), rm.ID)
 		// SetEnded already clears current_publish_client_id, freeing the
 		// publisher slot. We DELIBERATELY do not rotate stream_key here
 		// — see RotateAbandonedStreamKeys for the lazy-rotation flow.

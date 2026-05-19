@@ -673,13 +673,27 @@ func (h *Handler) banLiveRoom(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "room not found"})
 		return
 	}
-	// On ban (req.Banned=true): kick all current viewers + rotate key.
-	// On unban (req.Banned=false): no-op — the room is just marked
-	// ended; the owner has to start a fresh broadcast.
+	// Persist the reason so the streamer sees it in their Studio.
+	// On unban, clear it.
+	reason := strings.TrimSpace(req.Reason)
+	if !req.Banned {
+		reason = ""
+	}
+	_ = h.liveRepo.SetBannedReason(c.Request.Context(), id, reason)
+
+	// On ban: tear down the broadcast (kick viewers, rotate key,
+	// notify followers offline), push a dedicated `live.room.banned`
+	// event to the owner so their Studio shows the ban banner
+	// without waiting for a refresh.
 	if req.Banned {
 		if rm, ferr := h.liveRepo.FindByID(c.Request.Context(), id); ferr == nil && rm != nil {
 			h.liveHandler.EndRoom(c.Request.Context(), rm)
+			h.liveHandler.NotifyOwnerBanned(c.Request.Context(), rm.OwnerID, id, reason)
 		}
+	} else {
+		// On unban, push a `live.room.unbanned` event so the owner's
+		// Studio drops the banner.
+		h.liveHandler.NotifyOwnerUnbanned(c.Request.Context(), id)
 	}
 	if h.audit != nil {
 		action := "live.ban"

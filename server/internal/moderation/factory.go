@@ -27,6 +27,15 @@ type Config struct {
 	// reference them by name in MODERATION_PROVIDERS.
 	LMStudioEndpoint string
 	LMStudioModel    string
+
+	// MaxPerTick caps how many rooms a single sweep tick processes.
+	// Single-GPU LM Studio / Ollama can only run one inference at a
+	// time; if we naively scan every active room each minute, a 5th
+	// concurrent broadcast already overruns the GPU. The adaptive
+	// scheduler in live.Repo.ListReviewDue returns up to this many
+	// "most overdue" rooms; the rest wait for next tick. Default 4
+	// works for ~4 concurrent streams; raise on bigger GPUs.
+	MaxPerTick int
 }
 
 // Build assembles concrete Provider instances from the config in the

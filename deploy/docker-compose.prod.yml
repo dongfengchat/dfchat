@@ -177,6 +177,12 @@ services:
       # Mac/Windows; Linux operators need their box's LAN IP.
       LMSTUDIO_ENDPOINT: ${LMSTUDIO_ENDPOINT:-}
       LMSTUDIO_MODEL: ${LMSTUDIO_MODEL:-qwen2-vl-7b-instruct}
+      # Cap on rooms reviewed per moderation tick. Adaptive scheduler
+      # uses per-room next_due_at; this just bounds how many "due"
+      # rooms get processed in one 60 s window — match to GPU
+      # concurrency (LM Studio = 1, so a single tick fitting ~4
+      # serial calls of 15s each is reasonable).
+      MODERATION_MAX_PER_TICK: ${MODERATION_MAX_PER_TICK:-4}
       # Evidence archive — bind-mounted from host below so frames
       # survive api container restarts.
       MODERATION_EVIDENCE_DIR: /var/lib/dfchat/evidence

@@ -78,6 +78,7 @@ type Config struct {
 	ModerationLocalModel     string
 	ModerationLMStudioEndpoint string
 	ModerationLMStudioModel    string
+	ModerationMaxPerTick       int
 }
 
 func Load() (*Config, error) {
@@ -135,6 +136,7 @@ func Load() (*Config, error) {
 		ModerationLocalModel:       getEnv("MODERATION_LOCAL_MODEL", "qwen2.5-vl"),
 		ModerationLMStudioEndpoint: getEnv("LMSTUDIO_ENDPOINT", ""),
 		ModerationLMStudioModel:    getEnv("LMSTUDIO_MODEL", "qwen2-vl-7b-instruct"),
+		ModerationMaxPerTick:       getEnvInt("MODERATION_MAX_PER_TICK", 4),
 	}
 
 	if cfg.DatabaseURL == "" {

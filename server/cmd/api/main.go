@@ -144,6 +144,7 @@ func main() {
 		LocalModel:              cfg.ModerationLocalModel,
 		LMStudioEndpoint:        cfg.ModerationLMStudioEndpoint,
 		LMStudioModel:           cfg.ModerationLMStudioModel,
+		MaxPerTick:              cfg.ModerationMaxPerTick,
 	}, log)
 	// Sweep AI verdict rows older than 7 days every 6 hours. Pinned
 	// rows survive — admin pins anything they want to keep for

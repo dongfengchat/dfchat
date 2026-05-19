@@ -3,6 +3,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Activity,
   ArrowLeft,
+  Ban,
   Bell,
   BellOff,
   Calendar,
@@ -1655,6 +1656,23 @@ function Studio({ onPreview }: { onPreview: (r: LiveRoom) => void }) {
   }
   useEffect(() => { refresh(); }, []);
 
+  // Subscribe to ban / unban WS events targeted at this user. The
+  // server pushes `live.room.banned` when an admin bans one of our
+  // rooms; we toast + refresh so the banner appears immediately.
+  useEffect(() => {
+    const off = wsClient.on((ev) => {
+      if (ev.type === 'live.room.banned') {
+        const p = ev.payload as { roomId: string; reason?: string };
+        toast(`你的直播间被管理员封禁${p.reason ? '：' + p.reason : ''}`, 'error');
+        refresh();
+      } else if (ev.type === 'live.room.unbanned') {
+        toast('你的直播间已解封', 'success');
+        refresh();
+      }
+    });
+    return () => { off(); };
+  }, []);
+
   async function submitCreate() {
     if (!title.trim()) return;
     setCreating(true);
@@ -1798,6 +1816,7 @@ function StudioRoomCard({ room, onChanged, onPreview }: {
   }
 
   const isLive = room.status === 1;
+  const isBanned = room.status === 3;
   const isTest = room.isTest;
   const rtmpUrl = detail?.rtmpUrl ?? '';
   const streamKey = detail?.room.streamKey ?? '';
@@ -1805,20 +1824,40 @@ function StudioRoomCard({ room, onChanged, onPreview }: {
   const obsServer = rtmpUrl.replace(/\/[^/]+$/, '');
 
   return (
-    <div className="card p-5 anim-fade">
+    <div className={`card p-5 anim-fade ${isBanned ? 'border-accent-red/60' : ''}`}>
+      {isBanned && (
+        <div className="mb-4 -mt-1 -mx-1 bg-accent-red/10 border border-accent-red/40 rounded-lg p-3 flex items-start gap-2">
+          <Ban size={16} className="text-accent-red shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-accent-red">该直播间已被管理员封禁</div>
+            <div className="text-xs text-ink-2 mt-0.5">
+              {room.bannedReason
+                ? <>原因：{room.bannedReason}</>
+                : <>未提供具体原因。如有疑问请联系管理员申诉。</>}
+            </div>
+            <div className="text-[11px] text-ink-4 mt-1">
+              封禁期间无法推流，也不会出现在广场。OBS 会被服务端拒绝。
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex items-start gap-4">
         <Avatar name={room.title} size={48} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="font-semibold truncate">{room.title}</h3>
-            {isLive ? (
+            {isBanned ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-accent-red/20 text-accent-red text-[11px] font-medium">
+                <Ban size={10} /> 已封禁
+              </span>
+            ) : isLive ? (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-accent-red/20 text-accent-red text-[11px] font-medium">
                 <span className="w-1.5 h-1.5 rounded-full bg-accent-red animate-pulse" /> 推流中
               </span>
             ) : (
               <span className="px-2 py-0.5 rounded bg-bg-3 text-ink-3 text-[11px]">未推流</span>
             )}
-            {isTest ? (
+            {!isBanned && (isTest ? (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-brand-500/20 text-brand-300 text-[11px] font-medium">
                 <EyeOff size={10} /> 试播 · 仅自己可见
               </span>
@@ -1826,7 +1865,7 @@ function StudioRoomCard({ room, onChanged, onPreview }: {
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-accent-green/20 text-accent-green text-[11px] font-medium">
                 <Eye size={10} /> 公开 · 广场可见
               </span>
-            )}
+            ))}
           </div>
           <div className="text-xs text-ink-3 mt-0.5">
             {room.category || '未分类'} · 累计观看 {room.totalViews} · 创建于 {new Date(room.createdAt).toLocaleDateString()}

@@ -61,6 +61,11 @@ type Room struct {
 	PinnedDanmakuSender *int64     `json:"pinnedDanmakuSender,omitempty,string"`
 	PinnedDanmakuColor  *string    `json:"pinnedDanmakuColor,omitempty"`
 	PinnedDanmakuAt     *time.Time `json:"pinnedDanmakuAt,omitempty"`
+
+	// Reason recorded when an admin banned this room (status=3). NULL/
+	// empty when not banned. Surfaced to the streamer in Studio so they
+	// know why they can't broadcast.
+	BannedReason string `json:"bannedReason,omitempty"`
 }
 
 // roomSelectAll is the canonical column list for SELECTs that hydrate
@@ -72,14 +77,16 @@ const roomSelectAll = `id, owner_id, title, COALESCE(cover_url,''), COALESCE(cat
 		started_at, ended_at, created_at,
 		chat_subscribers_only, slow_mode_seconds,
 		pinned_danmaku_text, pinned_danmaku_sender,
-		pinned_danmaku_color, pinned_danmaku_at`
+		pinned_danmaku_color, pinned_danmaku_at,
+		COALESCE(banned_reason,'')`
 
 const roomSelectPublic = `id, owner_id, title, COALESCE(cover_url,''), COALESCE(category,''),
 		'' AS stream_key, status, viewer_count, total_views, is_test,
 		started_at, ended_at, created_at,
 		chat_subscribers_only, slow_mode_seconds,
 		pinned_danmaku_text, pinned_danmaku_sender,
-		pinned_danmaku_color, pinned_danmaku_at`
+		pinned_danmaku_color, pinned_danmaku_at,
+		COALESCE(banned_reason,'')`
 
 // scanRoom hydrates a Room from a row produced by a SELECT using
 // roomSelectAll. The pgx Row + Rows interfaces both satisfy this
@@ -96,6 +103,7 @@ func scanRoom(row rowScanner, rm *Room) error {
 		&rm.ChatSubscribersOnly, &rm.SlowModeSeconds,
 		&rm.PinnedDanmakuText, &rm.PinnedDanmakuSender,
 		&rm.PinnedDanmakuColor, &rm.PinnedDanmakuAt,
+		&rm.BannedReason,
 	)
 }
 
@@ -792,6 +800,108 @@ func (r *Repo) RecentDanmaku(ctx context.Context, roomID int64, limit int) ([]Da
 	return out, rows.Err()
 }
 
+// =============== Adaptive review scheduler =================
+
+// ReviewDueRoom is a thin projection of live_rooms used by the
+// adaptive moderation worker to decide what to check next, joined
+// with the per-room review_state. Streams stream_key in the clear
+// so the worker can build the thumbnail URL without a second
+// roundtrip.
+type ReviewDueRoom struct {
+	ID          int64
+	StreamKey   string
+	Title       string
+	IsTest      bool
+	CleanStreak int
+}
+
+// ListReviewDue returns up to `limit` rooms whose review is due now,
+// oldest-next-due first. Workers call this once per tick and process
+// at most `limit` rooms before yielding — bounding GPU pressure on
+// VRAM-constrained local model deployments. Test-mode rooms skipped.
+func (r *Repo) ListReviewDue(ctx context.Context, limit int) ([]ReviewDueRoom, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 4
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT rm.id, rm.stream_key, rm.title, rm.is_test,
+		       COALESCE(s.clean_streak, 0)
+		  FROM live_rooms rm
+		  LEFT JOIN live_room_review_state s ON s.room_id = rm.id
+		 WHERE rm.status = 1
+		   AND rm.is_test = FALSE
+		   AND COALESCE(s.next_due_at, '1970-01-01'::timestamptz) <= now()
+		 ORDER BY COALESCE(s.next_due_at, '1970-01-01'::timestamptz) ASC
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ReviewDueRoom, 0, limit)
+	for rows.Next() {
+		var rd ReviewDueRoom
+		if err := rows.Scan(&rd.ID, &rd.StreamKey, &rd.Title, &rd.IsTest, &rd.CleanStreak); err != nil {
+			return nil, err
+		}
+		out = append(out, rd)
+	}
+	return out, rows.Err()
+}
+
+// UpdateReviewSchedule advances a room's next_due_at based on the
+// outcome. Upserts on first call. The interval table — base 60 s,
+// caps at 15 min — is encoded here so the worker stays stateless.
+func (r *Repo) UpdateReviewSchedule(ctx context.Context, roomID int64, flagged bool) error {
+	if flagged {
+		// Reset streak + force next check ASAP.
+		_, err := r.pool.Exec(ctx, `
+			INSERT INTO live_room_review_state (room_id, clean_streak, next_due_at, last_check_at, last_flag_at)
+			VALUES ($1, 0, now() + interval '60 seconds', now(), now())
+			ON CONFLICT (room_id) DO UPDATE
+			   SET clean_streak  = 0,
+			       next_due_at   = now() + interval '60 seconds',
+			       last_check_at = now(),
+			       last_flag_at  = now()`, roomID)
+		return err
+	}
+	// Clean: bump streak, grow interval. Math in SQL so we don't
+	// race with concurrent ticks.
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO live_room_review_state (room_id, clean_streak, next_due_at, last_check_at)
+		VALUES ($1, 1, now() + interval '60 seconds', now())
+		ON CONFLICT (room_id) DO UPDATE
+		   SET clean_streak  = live_room_review_state.clean_streak + 1,
+		       last_check_at = now(),
+		       next_due_at   = now() + (CASE
+		         WHEN live_room_review_state.clean_streak + 1 >= 10 THEN interval '900 seconds'
+		         WHEN live_room_review_state.clean_streak + 1 >= 6  THEN interval '600 seconds'
+		         WHEN live_room_review_state.clean_streak + 1 >= 3  THEN interval '300 seconds'
+		         WHEN live_room_review_state.clean_streak + 1 >= 1  THEN interval '120 seconds'
+		         ELSE interval '60 seconds'
+		       END)`, roomID)
+	return err
+}
+
+// ResetReviewSchedule wipes the state for a room (e.g. on stream end
+// so the next broadcast doesn't inherit the previous streak).
+func (r *Repo) ResetReviewSchedule(ctx context.Context, roomID int64) error {
+	_, err := r.pool.Exec(ctx,
+		`DELETE FROM live_room_review_state WHERE room_id = $1`, roomID)
+	return err
+}
+
+// =============== Banned-room reason ===============
+
+// SetBannedReason stores the admin's stated reason on a room. Called
+// from adminBanLiveRoom so the streamer's Studio can render the
+// reason next to the banned badge. Pass empty to clear (on unban).
+func (r *Repo) SetBannedReason(ctx context.Context, roomID int64, reason string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE live_rooms SET banned_reason = NULLIF($2,'') WHERE id = $1`,
+		roomID, reason)
+	return err
+}
+
 // =============== AI moderation verdicts (every tick) ===============
 
 // Verdict is one row in live_ai_verdicts — captures the AI's
@@ -1004,6 +1114,21 @@ type Report struct {
 	OwnerAccountNo  string `json:"ownerAccountNo,omitempty"`
 	ReporterNickname  string `json:"reporterNickname,omitempty"`
 	ReporterAccountNo string `json:"reporterAccountNo,omitempty"`
+}
+
+// HasPendingAIReport returns true if there's an unresolved (status=0)
+// system/AI report (reporter_id IS NULL) for the same room+reason.
+// Used by the moderation worker to skip filing a duplicate report
+// when the room keeps flagging on consecutive ticks.
+func (r *Repo) HasPendingAIReport(ctx context.Context, roomID int64, reason string) (bool, error) {
+	var n int
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM live_room_reports
+		 WHERE room_id = $1 AND reason = $2
+		   AND reporter_id IS NULL AND status = 0`,
+		roomID, reason,
+	).Scan(&n)
+	return n > 0, err
 }
 
 // InsertReport adds a pending report. If the same (room, reporter,
