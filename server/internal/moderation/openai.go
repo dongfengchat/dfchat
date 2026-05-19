@@ -50,7 +50,11 @@ func NewOpenAIProvider(apiKey, model, baseURL string) *OpenAIProvider {
 		model:     model,
 		baseURL:   baseURL,
 		maxTokens: 256,
-		hc:        &http.Client{Timeout: 60 * time.Second},
+		// 120 s is the upper bound for "cold-loading a 30B+ local
+		// model after LM Studio TTL eviction". Hosted Claude/GPT
+		// come back in 1-3 s so this never bites them. The per-room
+		// context in the worker is also 120 s so they match.
+		hc:        &http.Client{Timeout: 120 * time.Second},
 	}
 }
 

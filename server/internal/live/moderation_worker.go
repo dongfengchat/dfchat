@@ -100,9 +100,13 @@ func (h *Handler) moderationSweep(ctx context.Context, providers []moderation.Pr
 		thumbURL := strings.Replace(strings.TrimRight(h.hlsURL, "/"), "/hls", "/thumbs", 1) +
 			"/" + full.StreamKey + ".jpg"
 
-		// Per-room ctx with a tight timeout so a slow provider doesn't
-		// stall the whole sweep.
-		roomCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// Per-room ctx with a generous timeout — LM Studio / Ollama
+		// cold-loading a 30B+ model after TTL eviction can easily take
+		// 60-90 s; cloud APIs (Claude/GPT/Gemini) come back in 1-3 s.
+		// 120 s covers both cases. The worker is sequential so this
+		// only stalls the rest of the sweep if every provider hangs;
+		// happy path is well under a second per room.
+		roomCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 		v, errs := moderation.First(roomCtx, providers, thumbURL)
 		cancel()
 		if v == nil {
