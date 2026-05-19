@@ -53,9 +53,16 @@ func (h *Handler) RunModerationLoop(ctx context.Context, cfg moderation.Config, 
 	if tick < 10*time.Second {
 		tick = 60 * time.Second
 	}
-	t := time.NewTicker(tick)
-	defer t.Stop()
+	// CRITICAL: the ticker + its defer t.Stop() MUST live inside the
+	// goroutine. Putting `defer t.Stop()` outside meant the deferred
+	// Stop fired the instant RunModerationLoop returned (immediately
+	// after launching the goroutine), killing the ticker before any
+	// tick fired. The boot sweep ran once, then the for loop blocked
+	// on a dead channel forever. Symptom: worker silent after first
+	// boot sweep, no panics, no errors.
 	go func() {
+		t := time.NewTicker(tick)
+		defer t.Stop()
 		// One sweep at boot so a stream that's been live since restart
 		// isn't ignored for the first interval.
 		h.moderationSweep(ctx, providers, cfg, log)
