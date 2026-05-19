@@ -17,15 +17,23 @@ import (
 )
 
 type Handler struct {
-	pool       *pgxpool.Pool
-	issuer     *auth.Issuer
-	audit      *audit.Logger
-	liveRepo   *live.Repo
-	liveHLSURL string // public HLS base, used to derive thumbnail URLs
+	pool        *pgxpool.Pool
+	issuer      *auth.Issuer
+	audit       *audit.Logger
+	liveRepo    *live.Repo
+	liveHandler *live.Handler // for shared teardown (force-end / ban → kick viewers)
+	liveHLSURL  string        // public HLS base, used to derive thumbnail URLs
 }
 
-func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer, auditor *audit.Logger, liveRepo *live.Repo, liveHLSURL string) *Handler {
-	return &Handler{pool: pool, issuer: issuer, audit: auditor, liveRepo: liveRepo, liveHLSURL: liveHLSURL}
+func NewHandler(pool *pgxpool.Pool, issuer *auth.Issuer, auditor *audit.Logger, liveRepo *live.Repo, liveHandler *live.Handler, liveHLSURL string) *Handler {
+	return &Handler{
+		pool:        pool,
+		issuer:      issuer,
+		audit:       auditor,
+		liveRepo:    liveRepo,
+		liveHandler: liveHandler,
+		liveHLSURL:  liveHLSURL,
+	}
 }
 
 func (h *Handler) Register(rg *gin.RouterGroup) {
@@ -607,19 +615,19 @@ func (h *Handler) forceEndLive(c *gin.Context) {
 	if !ok {
 		return
 	}
-	// Rotate stream_key to a fresh random value.
-	newKey, err := genRandomHex(16)
+	// Load room so EndRoom has the IsTest flag + can fire follower
+	// notify with the correct title. FindByID returns the full Room
+	// with stream_key — same shape EndRoom expects.
+	rm, err := h.liveRepo.FindByID(c.Request.Context(), id)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
-		return
-	}
-	tag, err := h.pool.Exec(c.Request.Context(),
-		`UPDATE live_rooms SET status = 2, ended_at = NOW(), stream_key = $2 WHERE id = $1`,
-		id, newKey)
-	if err != nil || tag.RowsAffected() == 0 {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "room not found"})
 		return
 	}
+	// Shared teardown — rotates key, broadcasts live.room.deleted to
+	// every WS-subscribed viewer (so their player kicks them out),
+	// notifies followers offline. Same path the owner's 结束直播
+	// button takes.
+	h.liveHandler.EndRoom(c.Request.Context(), rm)
 	if h.audit != nil {
 		h.audit.Write(c.Request.Context(), audit.Entry{
 			ActorID: actorID, Action: "live.force_end",
@@ -657,6 +665,14 @@ func (h *Handler) banLiveRoom(c *gin.Context) {
 	if err != nil || tag.RowsAffected() == 0 {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "room not found"})
 		return
+	}
+	// On ban (req.Banned=true): kick all current viewers + rotate key.
+	// On unban (req.Banned=false): no-op — the room is just marked
+	// ended; the owner has to start a fresh broadcast.
+	if req.Banned {
+		if rm, ferr := h.liveRepo.FindByID(c.Request.Context(), id); ferr == nil && rm != nil {
+			h.liveHandler.EndRoom(c.Request.Context(), rm)
+		}
 	}
 	if h.audit != nil {
 		action := "live.ban"

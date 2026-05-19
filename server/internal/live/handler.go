@@ -464,12 +464,42 @@ func (h *Handler) stopLive(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 80012, "message": "not the owner"})
 		return
 	}
-	_ = h.repo.SetEnded(c.Request.Context(), id)
-	_, _ = h.repo.ReleasePublisher(c.Request.Context(), id) // rotate key
-	if h.bus != nil && !rm.IsTest {
-		h.notifyFollowersOffline(c.Request.Context(), rm)
-	}
+	h.endRoom(c.Request.Context(), rm)
 	c.Status(http.StatusNoContent)
+}
+
+// EndRoom is the shared "this broadcast is over, tear it down" helper.
+// Sequence:
+//   1. SetEnded (status → 2, finalize stats)
+//   2. ReleasePublisher (rotate stream_key so existing OBS connection
+//      can't reconnect with the same key after disconnect)
+//   3. Broadcast `live.room.deleted` WS event to every currently
+//      subscribed viewer so their player kicks them out of the room.
+//      The client toasts "直播间已被关闭" and onBacks within 1.2 s.
+//   4. notifyFollowersOffline so non-watching followers see the host
+//      go offline in their notification feed.
+//
+// NOT done here (future work, needs server02 SRS HTTP API exposed):
+//   - Kick the actual SRS publisher TCP connection. The publisher
+//     can keep pushing for now; our HMAC playback URLs are still
+//     valid until the worker's 5-min sweeper rotates the key. Viewers
+//     who saved a signed URL externally COULD continue watching by
+//     hand for a few minutes. Inside the app they're already gone.
+//
+// Exported so admin.forceEndLive can call it with the same teardown.
+func (h *Handler) EndRoom(ctx context.Context, rm *Room) {
+	h.endRoom(ctx, rm)
+}
+
+func (h *Handler) endRoom(ctx context.Context, rm *Room) {
+	_ = h.repo.SetEnded(ctx, rm.ID)
+	_, _ = h.repo.ReleasePublisher(ctx, rm.ID)
+	if h.bus != nil {
+		h.broadcastRoomDeleted(ctx, rm.ID)
+		if !rm.IsTest {
+			h.notifyFollowersOffline(ctx, rm)
+		}
+	}
 }
 
 // === Tier-C chat moderation: settings + pinned danmaku ============

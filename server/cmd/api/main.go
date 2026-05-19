@@ -100,9 +100,13 @@ func main() {
 	messageHandler := message.NewHandler(messageRepo, friendRepo, groupRepo, channelRepo, issuer, bus)
 	syncHandler := sync.NewHandler(pool, issuer)
 	fileHandler := file.NewHandler(fileRepo, storageClient, issuer)
-	adminHandler := admin.NewHandler(pool, issuer, auditor, liveRepo, cfg.LiveHLSURL)
+	// liveHandler declared below — admin needs a reference to it for
+	// shared teardown on force-end / ban. Forward-declared at zero
+	// value here, populated immediately after live.NewHandler.
+	var adminHandler *admin.Handler
 	searchHandler := search.NewHandler(pool, issuer)
 	liveHandler := live.NewHandler(liveRepo, issuer, bus, cfg.LiveRTMPURL, cfg.LiveHLSURL, cfg.LiveSRSSecret, cfg.SRSInternalHTTP)
+	adminHandler = admin.NewHandler(pool, issuer, auditor, liveRepo, liveHandler, cfg.LiveHLSURL)
 	// relayAdapter implements realtime.RelayBackend: a relay (WebRTC
 	// signaling, typing) is allowed iff sender and recipient are friends
 	// or share at least one group. This keeps strangers from initiating
