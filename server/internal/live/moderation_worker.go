@@ -99,8 +99,13 @@ func (h *Handler) moderationSweep(ctx context.Context, providers []moderation.Pr
 		cancel()
 		if v == nil {
 			if len(errs) > 0 {
+				// slog renders []error as "[{}]"; stringify each.
+				msgs := make([]string, len(errs))
+				for i, e := range errs {
+					msgs[i] = e.Error()
+				}
 				log.Warn("moderation: all providers failed",
-					"roomId", rm.ID, "errors", errs)
+					"roomId", rm.ID, "thumbURL", thumbURL, "errors", msgs)
 			}
 			continue
 		}

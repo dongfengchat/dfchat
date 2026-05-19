@@ -56,8 +56,13 @@ services:
               # Most-recent ts segment for this stream key.
               latest=$$(ls -1t /usr/local/srs/objs/nginx/html/live/$$key-*.ts 2>/dev/null | head -1)
               [ -n "$$latest" ] || continue
+              # No -ss seek — HLS ts fragments are short (2 s @ default
+              # hls_fragment), and seeking before -i means ffmpeg looks
+              # for a keyframe after the seek point; if there isn't one
+              # in the first second, the output stays empty without an
+              # error. Just take the first decodable frame.
               ./objs/ffmpeg/bin/ffmpeg -loglevel error -y \
-                -ss 1 -i "$$latest" \
+                -i "$$latest" \
                 -frames:v 1 -vf scale=640:360 -q:v 5 \
                 /usr/local/srs/objs/nginx/html/thumbs/$$key.jpg 2>/dev/null || true
             done
