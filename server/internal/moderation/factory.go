@@ -60,21 +60,33 @@ func Build(c Config) ([]Provider, error) {
 			if c.LocalEndpoint == "" {
 				continue
 			}
-			// Local = OpenAI-compat server. apiKey may be empty for
-			// most self-hosted setups (Ollama, vLLM); pass an empty
-			// string and the provider will skip the Authorization
-			// header.
-			out = append(out, NewOpenAIProvider("", c.LocalModel, c.LocalEndpoint))
+			// Local = OpenAI-compat server. Most reject http(s) URL
+			// refs in image_url and require base64 inline; flip
+			// inlineImages on. apiKey usually empty; provider skips
+			// the Authorization header when so. Reasoning-mode
+			// models (Gemma, DeepSeek-R1, QwQ etc.) emit a "thinking"
+			// preamble that eats tokens before the JSON, so raise
+			// max_tokens generously — local inference doesn't bill
+			// per-token, no reason to be stingy.
+			out = append(out,
+				NewOpenAIProvider("", c.LocalModel, c.LocalEndpoint).
+					WithInlineImages(true).
+					WithMaxTokens(1024))
 		case "lmstudio", "lm-studio", "lm_studio":
 			// LM Studio defaults to :1234 with no auth. From inside
 			// the api docker container, "host.docker.internal" is
 			// the Mac/Windows host where LM Studio runs; on Linux
-			// hosts the operator passes the box's LAN IP instead.
+			// hosts host-gateway maps it (extra_hosts in compose).
+			// For a remote LM Studio reachable via Tailscale or
+			// reverse proxy, set LMSTUDIO_ENDPOINT to that URL.
 			ep := c.LMStudioEndpoint
 			if ep == "" {
 				ep = "http://host.docker.internal:1234"
 			}
-			out = append(out, NewOpenAIProvider("", c.LMStudioModel, ep))
+			out = append(out,
+				NewOpenAIProvider("", c.LMStudioModel, ep).
+					WithInlineImages(true).
+					WithMaxTokens(1024))
 		default:
 			return nil, ErrUnknownKind
 		}
