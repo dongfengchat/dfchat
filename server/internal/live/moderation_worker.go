@@ -118,9 +118,12 @@ func (h *Handler) moderationSweep(ctx context.Context, providers []moderation.Pr
 			continue
 		}
 		if v.MaxScore < cfg.Threshold {
-			log.Debug("moderation: clean",
+			// Logged at INFO so operators can see the worker is alive
+			// and what each model is scoring. Useful for threshold
+			// tuning + confirming Phase B is reaching the model.
+			log.Info("moderation: clean",
 				"roomId", rm.ID, "max", v.MaxScore, "cat", v.MaxCategory,
-				"provider", v.Provider)
+				"provider", v.Provider, "reason", v.Reason)
 			continue
 		}
 		// Flagged! Build the report row. AI reports go in as
