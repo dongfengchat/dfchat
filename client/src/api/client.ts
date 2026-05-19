@@ -1095,6 +1095,62 @@ export async function adminFetchEvidenceBlobURL(apiPath: string): Promise<string
   return URL.createObjectURL(res.data);
 }
 
+// ===== AI verdict audit log =====
+//
+// Every moderation tick (clean or flagged) lands in live_ai_verdicts.
+// Admin can label rows (agree / should_flag / false_positive) and
+// pin rows to survive the 7-day rolling cleanup.
+
+export type VerdictLabel = '' | 'agree' | 'should_flag' | 'false_positive';
+
+export interface LiveVerdict {
+  id: string;
+  roomId: string;
+  provider: string;
+  maxCategory: string;
+  maxScore: number;
+  scores: string;          // JSON string: {"nsfw":0.xx, "violence":..., ...}
+  reason?: string;
+  thumbnailUrl?: string;
+  flagged: boolean;
+  reportId?: string;
+  manualLabel?: VerdictLabel;
+  labeledBy?: string;
+  labeledAt?: string;
+  pinned: boolean;
+  createdAt: string;
+  // Joined room + owner snapshot.
+  roomTitle?: string;
+  roomStatus?: number;
+  ownerNickname?: string;
+  ownerAccountNo?: string;
+}
+
+export async function adminListLiveVerdicts(opts: {
+  roomId?: string;
+  flagged?: boolean;
+  unlabeled?: boolean;
+  limit?: number;
+} = {}): Promise<LiveVerdict[]> {
+  const params: Record<string, string | number> = {};
+  if (opts.roomId)   params.roomId = opts.roomId;
+  if (opts.flagged)  params.flagged = 1;
+  if (opts.unlabeled) params.unlabeled = 1;
+  if (opts.limit)    params.limit = opts.limit;
+  try {
+    const res = await api.get<{ verdicts: LiveVerdict[] }>('/api/v1/admin/live/verdicts', { params });
+    return res.data.verdicts ?? [];
+  } catch (e) { throw unwrapError(e); }
+}
+
+export async function adminLabelLiveVerdict(id: string, label: VerdictLabel, note?: string): Promise<void> {
+  try { await api.post(`/api/v1/admin/live/verdicts/${id}/label`, { label, note }); } catch (e) { throw unwrapError(e); }
+}
+
+export async function adminPinLiveVerdict(id: string, pinned: boolean): Promise<void> {
+  try { await api.post(`/api/v1/admin/live/verdicts/${id}/pin`, { pinned }); } catch (e) { throw unwrapError(e); }
+}
+
 export function channelConvId(channelId: string): string {
   return `c_${channelId}`;
 }

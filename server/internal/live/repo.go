@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -791,6 +792,188 @@ func (r *Repo) RecentDanmaku(ctx context.Context, roomID int64, limit int) ([]Da
 	return out, rows.Err()
 }
 
+// =============== AI moderation verdicts (every tick) ===============
+
+// Verdict is one row in live_ai_verdicts — captures the AI's
+// judgment of a single thumbnail at a single moment. Includes both
+// clean (max_score below threshold) and flagged verdicts so the
+// admin can audit AI accuracy in either direction. Manual labels +
+// pinning live on the row so the audit trail is self-contained.
+type Verdict struct {
+	ID            int64      `json:"id,string"`
+	RoomID        int64      `json:"roomId,string"`
+	Provider      string     `json:"provider"`
+	MaxCategory   string     `json:"maxCategory"`
+	MaxScore      float32    `json:"maxScore"`
+	Scores        []byte     `json:"-"` // raw JSONB bytes; ScoresJSON below for marshaling
+	ScoresJSON    string     `json:"scores"`
+	Reason        string     `json:"reason,omitempty"`
+	ThumbnailURL  string     `json:"thumbnailUrl,omitempty"`
+	Flagged       bool       `json:"flagged"`
+	ReportID      *int64     `json:"reportId,omitempty,string"`
+	ManualLabel   string     `json:"manualLabel,omitempty"`
+	LabeledBy     *int64     `json:"labeledBy,omitempty,string"`
+	LabeledAt     *time.Time `json:"labeledAt,omitempty"`
+	Pinned        bool       `json:"pinned"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	// Joined snapshot — saves N+1 lookups in the admin UI.
+	RoomTitle      string `json:"roomTitle,omitempty"`
+	RoomStatus     int    `json:"roomStatus,omitempty"`
+	OwnerNickname  string `json:"ownerNickname,omitempty"`
+	OwnerAccountNo string `json:"ownerAccountNo,omitempty"`
+}
+
+// InsertVerdict stores one tick's judgment. Returns the new id so
+// the worker can wire it to a follow-up live_room_reports.id (when
+// flagged) via UpdateVerdictReportLink.
+func (r *Repo) InsertVerdict(ctx context.Context, roomID int64, provider, maxCategory string, maxScore float64, scoresJSON, reason, thumbURL string, flagged bool) (int64, error) {
+	var id int64
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO live_ai_verdicts
+		  (room_id, provider, max_category, max_score, scores, reason, thumbnail_url, flagged)
+		VALUES ($1, $2, $3, $4, $5::jsonb, NULLIF($6,''), NULLIF($7,''), $8)
+		RETURNING id`,
+		roomID, provider, maxCategory, maxScore, scoresJSON, reason, thumbURL, flagged,
+	).Scan(&id)
+	return id, err
+}
+
+// LinkVerdictReport wires a verdict to the report row the worker
+// just inserted for it. Allows the admin UI to jump from verdict ↔
+// report bidirectionally and lets "false_positive" auto-dismiss
+// the linked report.
+func (r *Repo) LinkVerdictReport(ctx context.Context, verdictID, reportID int64) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE live_ai_verdicts SET report_id = $2 WHERE id = $1`, verdictID, reportID)
+	return err
+}
+
+// ListVerdicts returns verdicts newest-first with the joined room +
+// owner snapshot. Filters:
+//   - roomID > 0:        only that room
+//   - flaggedOnly:       only AI-flagged rows
+//   - unlabeledOnly:     only rows the admin hasn't labeled yet
+//   - sinceCursor > 0:   pagination (created_at < since); 0 = first page
+func (r *Repo) ListVerdicts(ctx context.Context, roomID int64, flaggedOnly, unlabeledOnly bool, limit int) ([]Verdict, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	args := []any{limit}
+	where := []string{"1=1"}
+	if roomID > 0 {
+		args = append(args, roomID)
+		where = append(where, fmt.Sprintf("v.room_id = $%d", len(args)))
+	}
+	if flaggedOnly {
+		where = append(where, "v.flagged = TRUE")
+	}
+	if unlabeledOnly {
+		where = append(where, "v.manual_label IS NULL")
+	}
+	q := `
+		SELECT
+		  v.id, v.room_id, v.provider, v.max_category, v.max_score,
+		  v.scores::text, COALESCE(v.reason,''), COALESCE(v.thumbnail_url,''),
+		  v.flagged, v.report_id, COALESCE(v.manual_label,''), v.labeled_by, v.labeled_at,
+		  v.pinned, v.created_at,
+		  rm.title, rm.status,
+		  COALESCE(u.nickname,''), COALESCE(u.account_no::text,'')
+		  FROM live_ai_verdicts v
+		  JOIN live_rooms rm ON rm.id = v.room_id
+		  LEFT JOIN users u ON u.id = rm.owner_id
+		 WHERE ` + strings.Join(where, " AND ") + `
+		 ORDER BY v.created_at DESC LIMIT $1`
+	rows, err := r.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Verdict, 0)
+	for rows.Next() {
+		var v Verdict
+		if err := rows.Scan(
+			&v.ID, &v.RoomID, &v.Provider, &v.MaxCategory, &v.MaxScore,
+			&v.ScoresJSON, &v.Reason, &v.ThumbnailURL,
+			&v.Flagged, &v.ReportID, &v.ManualLabel, &v.LabeledBy, &v.LabeledAt,
+			&v.Pinned, &v.CreatedAt,
+			&v.RoomTitle, &v.RoomStatus,
+			&v.OwnerNickname, &v.OwnerAccountNo,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// LabelVerdict records an admin's manual judgment of a verdict.
+// `label` is one of: agree / should_flag / false_positive — values
+// match the comment in the migration. Pass empty string to clear.
+// Returns the row's report_id (or nil) so the caller can act on
+// linked reports — typical pattern:
+//
+//   - label=should_flag and reportID was NULL → caller creates a
+//     new report row to put it in the admin queue
+//   - label=false_positive and reportID was non-NULL → caller
+//     resolves that report with status=2 (dismissed)
+func (r *Repo) LabelVerdict(ctx context.Context, id, byUserID int64, label string) (*int64, error) {
+	var reportID *int64
+	err := r.pool.QueryRow(ctx, `
+		UPDATE live_ai_verdicts
+		   SET manual_label = NULLIF($2,''),
+		       labeled_by   = $3,
+		       labeled_at   = now()
+		 WHERE id = $1
+		 RETURNING report_id`, id, label, byUserID,
+	).Scan(&reportID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return reportID, err
+}
+
+// PinVerdict toggles the pinned flag so the cleanup sweeper leaves
+// the row + its archived thumbnail in place beyond the 7-day window.
+func (r *Repo) PinVerdict(ctx context.Context, id int64, pinned bool) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE live_ai_verdicts SET pinned = $2 WHERE id = $1`, id, pinned)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SweepOldVerdicts deletes verdicts older than `maxAge` that aren't
+// pinned, returning the list of thumbnail_url paths the caller
+// should also unlink from disk. The DB delete is the source of
+// truth; failed file unlinks just leak storage.
+func (r *Repo) SweepOldVerdicts(ctx context.Context, maxAge time.Duration) ([]string, error) {
+	cutoff := time.Now().Add(-maxAge)
+	rows, err := r.pool.Query(ctx, `
+		DELETE FROM live_ai_verdicts
+		 WHERE pinned = FALSE
+		   AND created_at < $1
+		 RETURNING COALESCE(thumbnail_url,'')`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var thumbs []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return thumbs, err
+		}
+		if t != "" {
+			thumbs = append(thumbs, t)
+		}
+	}
+	return thumbs, rows.Err()
+}
+
 // =============== User reports (admin review queue) ===============
 
 // Report mirrors a row in live_room_reports. The thumbnail_url is
@@ -836,6 +1019,28 @@ func (r *Repo) InsertReport(ctx context.Context, roomID int64, reporterID *int64
 		  DO NOTHING`,
 		roomID, reporterID, reason, note, thumbURL)
 	return err
+}
+
+// InsertReportReturnID is the same as InsertReport but returns the
+// new row's id. Used by the moderation worker to wire the verdict
+// row to its report row for bidirectional UI navigation. Returns
+// id=0 on ON CONFLICT skip (duplicate within unique-index window).
+func (r *Repo) InsertReportReturnID(ctx context.Context, roomID int64, reporterID *int64, reason, note, thumbURL string) (int64, error) {
+	var id int64
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO live_room_reports (room_id, reporter_id, reason, note, thumbnail_url)
+		VALUES ($1, $2, $3, NULLIF($4,''), NULLIF($5,''))
+		ON CONFLICT (room_id, reporter_id, reason)
+		  WHERE reporter_id IS NOT NULL AND status = 0
+		  DO NOTHING
+		RETURNING id`,
+		roomID, reporterID, reason, note, thumbURL,
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Conflict — already a pending report for this combo.
+		return 0, nil
+	}
+	return id, err
 }
 
 // ListReports returns reports filtered by status, newest first, with

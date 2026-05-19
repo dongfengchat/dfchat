@@ -145,6 +145,11 @@ func main() {
 		LMStudioEndpoint:        cfg.ModerationLMStudioEndpoint,
 		LMStudioModel:           cfg.ModerationLMStudioModel,
 	}, log)
+	// Sweep AI verdict rows older than 7 days every 6 hours. Pinned
+	// rows survive — admin pins anything they want to keep for
+	// investigations / training-set export. Files on disk are
+	// unlinked alongside DB rows.
+	liveHandler.RunVerdictCleanup(ctx, 7*24*time.Hour, log)
 	// Background reconciler: polls SRS /api/v1/streams every 60 s and
 	// marks any DB row "live" that SRS doesn't actually have a publisher
 	// for as ended. Catches the "OBS crashed mid-stream + on_unpublish

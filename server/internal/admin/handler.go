@@ -3,6 +3,7 @@ package admin
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -64,6 +65,12 @@ func (h *Handler) Register(rg *gin.RouterGroup) {
 	// snapshots thumbnails at flag time so admin reviews see the
 	// actual offending frame (live thumbs churn every 30 s).
 	g.GET("/live/evidence/:day/:name", h.serveEvidence)
+	// AI verdict audit log — every tick the worker fires lands here,
+	// not just the flagged ones. Lets the admin spot-check what
+	// Gemma/Claude/GPT is judging and override mistakes.
+	g.GET("/live/verdicts", h.listLiveVerdicts)
+	g.POST("/live/verdicts/:id/label", h.labelLiveVerdict)
+	g.POST("/live/verdicts/:id/pin", h.pinLiveVerdict)
 }
 
 func (h *Handler) requireAdmin(c *gin.Context) {
@@ -826,6 +833,156 @@ func (h *Handler) serveEvidence(c *gin.Context) {
 	full := live.EvidenceDir + "/" + day + "/" + name
 	c.Header("Cache-Control", "private, max-age=86400")
 	c.File(full)
+}
+
+// ============================================================
+// AI verdict audit log
+// listLiveVerdicts → GET /admin/live/verdicts?roomId=&flagged=&unlabeled=&limit=
+// labelLiveVerdict → POST /admin/live/verdicts/:id/label
+//   body: { "label": "agree" | "should_flag" | "false_positive" }
+//   side effects:
+//     should_flag    → if no linked report, create one in the queue
+//     false_positive → if linked report still pending, dismiss it
+// pinLiveVerdict   → POST /admin/live/verdicts/:id/pin
+//   body: { "pinned": true|false } — survive 7-day cleanup or not
+// ============================================================
+
+func (h *Handler) listLiveVerdicts(c *gin.Context) {
+	var roomID int64
+	if v := c.Query("roomId"); v != "" {
+		roomID, _ = strconv.ParseInt(v, 10, 64)
+	}
+	flagged := c.Query("flagged") == "1"
+	unlabeled := c.Query("unlabeled") == "1"
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	rows, err := h.liveRepo.ListVerdicts(c.Request.Context(), roomID, flagged, unlabeled, limit)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"verdicts": rows})
+}
+
+type labelVerdictReq struct {
+	// "agree" / "should_flag" / "false_positive" — see migration 28.
+	// Empty clears the label.
+	Label string `json:"label"`
+	// Only used when label = "should_flag": admin's optional note
+	// that goes into the new report's note field. Defaults to a
+	// canned "AI 漏判，管理员补报" if empty.
+	Note string `json:"note"`
+}
+
+func (h *Handler) labelLiveVerdict(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	var req labelVerdictReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "invalid body"})
+		return
+	}
+	switch req.Label {
+	case "", "agree", "should_flag", "false_positive":
+	default:
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "bad label"})
+		return
+	}
+
+	// Need the full verdict row to know roomId / reportId / category
+	// for follow-up actions. Fetch one before labeling.
+	verdicts, err := h.liveRepo.ListVerdicts(c.Request.Context(), 0, false, false, 200)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+	var v *live.Verdict
+	for i := range verdicts {
+		if verdicts[i].ID == id {
+			v = &verdicts[i]
+			break
+		}
+	}
+	if v == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "verdict not found"})
+		return
+	}
+
+	reportID, err := h.liveRepo.LabelVerdict(c.Request.Context(), id, uid, req.Label)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50001, "message": "internal error"})
+		return
+	}
+
+	// Side effects per label type.
+	switch req.Label {
+	case "should_flag":
+		// AI said clean but admin disagrees → create a report so it
+		// shows up in the human-review queue. Skip if there's
+		// already a report linked to this verdict.
+		if reportID == nil || *reportID == 0 {
+			note := req.Note
+			if note == "" {
+				note = fmt.Sprintf("[人工补报 by uid=%d | AI 漏判] AI 给出 %s=%.2f", uid, v.MaxCategory, v.MaxScore)
+			}
+			rid, ierr := h.liveRepo.InsertReportReturnID(
+				c.Request.Context(), v.RoomID, &uid, v.MaxCategory, note, v.ThumbnailURL,
+			)
+			if ierr == nil && rid > 0 {
+				_ = h.liveRepo.LinkVerdictReport(c.Request.Context(), id, rid)
+			}
+		}
+	case "false_positive":
+		// AI flagged but admin disagrees → auto-dismiss the linked
+		// report (if any) so the queue clears without separate click.
+		if reportID != nil && *reportID > 0 {
+			_ = h.liveRepo.ResolveReport(c.Request.Context(), *reportID, uid, 2, "ai_false_positive")
+		}
+	}
+
+	if h.audit != nil {
+		h.audit.Write(c.Request.Context(), audit.Entry{
+			ActorID: uid, Action: "live.verdict.label",
+			TargetKind: "live_verdict", TargetID: id,
+			IP: c.ClientIP(), UserAgent: c.GetHeader("User-Agent"),
+			Metadata: map[string]any{"label": req.Label},
+		})
+	}
+	c.Status(http.StatusNoContent)
+}
+
+type pinVerdictReq struct {
+	Pinned bool `json:"pinned"`
+}
+
+func (h *Handler) pinLiveVerdict(c *gin.Context) {
+	uid := c.MustGet("userID").(int64)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80010, "message": "invalid id"})
+		return
+	}
+	var req pinVerdictReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 80022, "message": "invalid body"})
+		return
+	}
+	if err := h.liveRepo.PinVerdict(c.Request.Context(), id, req.Pinned); err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"code": 80011, "message": "verdict not found"})
+		return
+	}
+	if h.audit != nil {
+		h.audit.Write(c.Request.Context(), audit.Entry{
+			ActorID: uid, Action: "live.verdict.pin",
+			TargetKind: "live_verdict", TargetID: id,
+			IP: c.ClientIP(), UserAgent: c.GetHeader("User-Agent"),
+			Metadata: map[string]any{"pinned": req.Pinned},
+		})
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (h *Handler) livePatrol(c *gin.Context) {

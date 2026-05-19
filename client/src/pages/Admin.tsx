@@ -30,9 +30,12 @@ import {
   adminForceEndLive,
   adminForceLogoutUser,
   adminGrantPremiumNumber,
+  adminLabelLiveVerdict,
   adminListLiveReports,
   adminListLivePatrol,
   adminListLiveRooms,
+  adminListLiveVerdicts,
+  adminPinLiveVerdict,
   adminListPremiumNumbers,
   adminListUsers,
   adminReleasePremiumNumber,
@@ -47,6 +50,8 @@ import {
   type AdminUser,
   type LiveReport,
   type LivePatrolRoom,
+  type LiveVerdict,
+  type VerdictLabel,
   type LoginLogEntry,
 } from '@/api/client';
 import { useUserStore } from '@/store/userStore';
@@ -475,7 +480,7 @@ function UserDetailsModal({
 // moderation surfaces. Kept inside the same outer tab so the
 // "report processed → bump room status" actions can co-exist with
 // the regular room admin without a second page navigation.
-type LiveSubTab = 'rooms' | 'reports' | 'patrol';
+type LiveSubTab = 'rooms' | 'reports' | 'patrol' | 'verdicts';
 
 function LiveAdminPanel() {
   const [subTab, setSubTab] = useState<LiveSubTab>('rooms');
@@ -499,9 +504,10 @@ function LiveAdminPanel() {
     <section className="px-6 pb-6 pt-4">
       <div className="flex items-center gap-2 mb-3 border-b border-bg-5/40">
         {([
-          { v: 'rooms',   label: '房间管理' },
-          { v: 'reports', label: `举报队列${pendingCount > 0 ? ` · ${pendingCount}` : ''}` },
-          { v: 'patrol',  label: '实时巡查' },
+          { v: 'rooms',    label: '房间管理' },
+          { v: 'reports',  label: `举报队列${pendingCount > 0 ? ` · ${pendingCount}` : ''}` },
+          { v: 'patrol',   label: '实时巡查' },
+          { v: 'verdicts', label: 'AI 决策日志' },
         ] as const).map((opt) => (
           <button
             key={opt.v}
@@ -521,9 +527,10 @@ function LiveAdminPanel() {
           </button>
         ))}
       </div>
-      {subTab === 'rooms'   && <LiveRoomsPanel />}
-      {subTab === 'reports' && <LiveReportsPanel onResolved={() => setPendingCount((c) => Math.max(0, c - 1))} />}
-      {subTab === 'patrol'  && <LivePatrolPanel />}
+      {subTab === 'rooms'    && <LiveRoomsPanel />}
+      {subTab === 'reports'  && <LiveReportsPanel onResolved={() => setPendingCount((c) => Math.max(0, c - 1))} />}
+      {subTab === 'patrol'   && <LivePatrolPanel />}
+      {subTab === 'verdicts' && <LiveVerdictsPanel />}
     </section>
   );
 }
@@ -921,6 +928,199 @@ function LivePatrolPanel() {
           </div>
         </a>
       ))}
+    </div>
+  );
+}
+
+// LiveVerdictsPanel — every tick the AI moderation worker fires
+// lands here, with the AI's score breakdown + the archived
+// thumbnail. Admin can label each row as "agree / should_flag /
+// false_positive" and pin rows to survive the 7-day rolling cleanup.
+//
+// Filters: AI-flagged only / unlabeled only. Useful workflow:
+//   1. set "unlabeled = true" → review backlog
+//   2. quickly hit "agree" on the obvious-clean ones
+//   3. promote AI misses ("should_flag") or drop AI false alarms
+//      ("false_positive") → triggers the side effects in the
+//      server-side label handler.
+function LiveVerdictsPanel() {
+  const [items, setItems] = useState<LiveVerdict[] | null>(null);
+  const [flaggedOnly, setFlaggedOnly] = useState(false);
+  const [unlabeledOnly, setUnlabeledOnly] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function refresh() {
+    try {
+      const rows = await adminListLiveVerdicts({
+        flagged: flaggedOnly,
+        unlabeled: unlabeledOnly,
+        limit: 100,
+      });
+      setItems(rows);
+    } catch (e: any) {
+      toast(e.message ?? '加载失败', 'error');
+    }
+  }
+  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [flaggedOnly, unlabeledOnly]);
+
+  async function act(id: string, fn: () => Promise<void>, okMsg: string) {
+    setBusy(id);
+    try {
+      await fn();
+      toast(okMsg, 'success');
+      await refresh();
+    } catch (e: any) {
+      toast(e.message ?? '操作失败', 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const reasonLabel: Record<string, string> = {
+    nsfw: '色情', violence: '暴力', politics: '政治', gambling: '赌博', fraud: '诈骗',
+  };
+
+  function parseScores(s: string): Record<string, number> {
+    try { return JSON.parse(s) as Record<string, number>; } catch { return {}; }
+  }
+
+  function labelPill(label?: VerdictLabel) {
+    if (!label) return null;
+    const map: Record<string, { text: string; cls: string }> = {
+      agree:           { text: '✓ 一致',     cls: 'bg-accent-green/15 text-accent-green' },
+      should_flag:     { text: '⚠ 应该 flag', cls: 'bg-accent-red/15 text-accent-red' },
+      false_positive: { text: '✗ 误判',     cls: 'bg-accent-amber/15 text-accent-amber' },
+    };
+    const p = map[label];
+    if (!p) return null;
+    return <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${p.cls}`}>{p.text}</span>;
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-3 text-xs">
+        <label className="inline-flex items-center gap-1 cursor-pointer text-ink-2">
+          <input
+            type="checkbox"
+            className="accent-brand-500"
+            checked={flaggedOnly}
+            onChange={(e) => setFlaggedOnly(e.target.checked)}
+          />
+          只看 AI 命中
+        </label>
+        <label className="inline-flex items-center gap-1 cursor-pointer text-ink-2">
+          <input
+            type="checkbox"
+            className="accent-brand-500"
+            checked={unlabeledOnly}
+            onChange={(e) => setUnlabeledOnly(e.target.checked)}
+          />
+          只看未标注
+        </label>
+        <span className="ml-auto text-ink-4">每 60s 自动写入 · 7 天清理 · pin 可保留</span>
+      </div>
+
+      {!items && <div className="text-ink-4 text-sm py-10 text-center">加载中…</div>}
+      {items && items.length === 0 && (
+        <div className="text-ink-4 text-sm py-10 text-center">没有 AI 决策记录</div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {items?.map((v) => {
+          const isBusy = busy === v.id;
+          const scores = parseScores(v.scores);
+          return (
+            <div key={v.id} className="card p-3 flex gap-3 anim-fade">
+              <div className="w-32 h-20 shrink-0 bg-bg-3 rounded overflow-hidden flex items-center justify-center">
+                {v.thumbnailUrl ? (
+                  <EvidenceImg src={v.thumbnailUrl} className="w-full h-full object-cover" />
+                ) : (
+                  <Ban size={18} className="text-ink-4" />
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {v.flagged ? (
+                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-accent-red/15 text-accent-red font-medium inline-flex items-center gap-1">
+                      🚩 {reasonLabel[v.maxCategory] || v.maxCategory} {v.maxScore.toFixed(2)}
+                    </span>
+                  ) : (
+                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-bg-3 text-ink-3">
+                      ✓ 合规 max={v.maxScore.toFixed(2)}
+                    </span>
+                  )}
+                  <span className="text-sm font-medium text-ink-1 truncate">{v.roomTitle || '(已删除)'}</span>
+                  <span className="text-[11px] text-ink-4">#{v.roomId}</span>
+                  {v.pinned && <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand-500/15 text-brand-300">📌 已固定</span>}
+                  {labelPill(v.manualLabel as VerdictLabel)}
+                </div>
+                <div className="text-[11px] text-ink-3 mt-1 truncate">
+                  {v.ownerNickname || '—'} <span className="text-ink-4 font-mono">#{v.ownerAccountNo || '?'}</span>
+                  <span className="text-ink-4">  ·  </span>
+                  <span className="font-mono">{v.provider}</span>
+                  <span className="text-ink-4">  ·  </span>
+                  {new Date(v.createdAt).toLocaleString('zh-CN', { hour12: false })}
+                </div>
+                {/* 5 category scores in mini bar */}
+                <div className="mt-1.5 flex gap-2 text-[10px] text-ink-4 font-mono">
+                  {(['nsfw','violence','politics','gambling','fraud'] as const).map((k) => {
+                    const s = scores[k] ?? 0;
+                    const bad = s >= 0.7;
+                    return (
+                      <span key={k} className={bad ? 'text-accent-red' : ''}>
+                        {reasonLabel[k]}={s.toFixed(2)}
+                      </span>
+                    );
+                  })}
+                </div>
+                {v.reason && (
+                  <div className="text-xs text-ink-2 mt-1 bg-bg-3/60 rounded px-2 py-1 break-words">
+                    {v.reason}
+                  </div>
+                )}
+                <div className="mt-2 flex flex-wrap gap-1">
+                  <button
+                    disabled={isBusy || v.manualLabel === 'agree'}
+                    onClick={() => act(v.id, () => adminLabelLiveVerdict(v.id, 'agree'), '已标记一致')}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25 text-xs disabled:opacity-50"
+                  >
+                    ✓ AI 判得对
+                  </button>
+                  {!v.flagged && (
+                    <button
+                      disabled={isBusy || v.manualLabel === 'should_flag'}
+                      onClick={() => {
+                        const note = prompt('补充说明（可选）：', '') ?? '';
+                        act(v.id, () => adminLabelLiveVerdict(v.id, 'should_flag', note), '已补报');
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded bg-accent-red/15 text-accent-red hover:bg-accent-red/25 text-xs disabled:opacity-50"
+                    >
+                      ⚠ 漏判，应 flag
+                    </button>
+                  )}
+                  {v.flagged && (
+                    <button
+                      disabled={isBusy || v.manualLabel === 'false_positive'}
+                      onClick={() => act(v.id, () => adminLabelLiveVerdict(v.id, 'false_positive'), '已驳回')}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded bg-accent-amber/15 text-accent-amber hover:bg-accent-amber/25 text-xs disabled:opacity-50"
+                    >
+                      ✗ 误判，应放过
+                    </button>
+                  )}
+                  <button
+                    disabled={isBusy}
+                    onClick={() => act(v.id, () => adminPinLiveVerdict(v.id, !v.pinned), v.pinned ? '已取消固定' : '已固定')}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-bg-3 text-ink-2 hover:bg-bg-4 text-xs"
+                    title={v.pinned ? '取消固定（7 天后清理）' : '固定保留（不被清理）'}
+                  >
+                    {v.pinned ? '取消固定' : '📌 固定'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

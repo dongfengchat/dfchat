@@ -121,27 +121,13 @@ func (h *Handler) moderationSweep(ctx context.Context, providers []moderation.Pr
 			}
 			continue
 		}
-		if v.MaxScore < cfg.Threshold {
-			// Logged at INFO so operators can see the worker is alive
-			// and what each model is scoring. Useful for threshold
-			// tuning + confirming Phase B is reaching the model.
-			log.Info("moderation: clean",
-				"roomId", rm.ID, "max", v.MaxScore, "cat", v.MaxCategory,
-				"provider", v.Provider, "reason", v.Reason)
-			continue
-		}
-		// Flagged! Build the report row. AI reports go in as
-		// reporter_id = NULL; the unique-index ON CONFLICT skip
-		// handles the case where the previous tick already flagged
-		// the same room with the same category for the same provider.
-		// We tag the provider into the note so the admin sees who
-		// flagged it.
-		note := fmt.Sprintf("[AI:%s | 置信度 %.2f] %s",
-			v.Provider, v.MaxScore, v.Reason)
+		flagged := v.MaxScore >= cfg.Threshold
 
-		// Archive the evidence frame so later review survives the
-		// thumbnail churn. archiveErr is logged but not fatal — we
-		// fall back to the live thumbnail URL.
+		// EVERY verdict (clean or flagged) gets an archived thumbnail
+		// + a row in live_ai_verdicts. The 7-day sweep clears them;
+		// admins can pin individual rows to keep them. This is the
+		// audit trail that lets operators measure AI accuracy +
+		// retrain on mismatches.
 		evidenceURL := thumbURL
 		if archived, err := archiveEvidence(thumbURL); err == nil {
 			evidenceURL = archived
@@ -150,18 +136,115 @@ func (h *Handler) moderationSweep(ctx context.Context, providers []moderation.Pr
 				"roomId", rm.ID, "err", err)
 		}
 
-		if err := h.repo.InsertReport(
-			ctx, rm.ID, nil, string(v.MaxCategory), note, evidenceURL,
-		); err != nil {
-			log.Warn("moderation: InsertReport failed",
-				"roomId", rm.ID, "err", err)
+		// Build JSON for the scores column. Keys match the
+		// moderation.Category enum so downstream readers don't
+		// have to translate.
+		scoresJSON := fmt.Sprintf(
+			`{"nsfw":%.4f,"violence":%.4f,"politics":%.4f,"gambling":%.4f,"fraud":%.4f}`,
+			v.Categories[moderation.CategoryNSFW],
+			v.Categories[moderation.CategoryViolence],
+			v.Categories[moderation.CategoryPolitics],
+			v.Categories[moderation.CategoryGambling],
+			v.Categories[moderation.CategoryFraud],
+		)
+		verdictID, vErr := h.repo.InsertVerdict(
+			ctx, rm.ID, v.Provider, string(v.MaxCategory), v.MaxScore,
+			scoresJSON, v.Reason, evidenceURL, flagged,
+		)
+		if vErr != nil {
+			log.Warn("moderation: InsertVerdict failed",
+				"roomId", rm.ID, "err", vErr)
+		}
+
+		if !flagged {
+			log.Info("moderation: clean",
+				"roomId", rm.ID, "verdictId", verdictID,
+				"max", v.MaxScore, "cat", v.MaxCategory,
+				"provider", v.Provider, "reason", v.Reason)
 			continue
+		}
+		// Flagged → also file a report row in the human-review
+		// queue. The unique-index ON CONFLICT in InsertReport
+		// collapses duplicate flags from the same room+category
+		// within a status=0 window. We still record a verdict per
+		// tick above; the report is the surfacing layer.
+		note := fmt.Sprintf("[AI:%s | 置信度 %.2f] %s",
+			v.Provider, v.MaxScore, v.Reason)
+		reportID, rErr := h.repo.InsertReportReturnID(
+			ctx, rm.ID, nil, string(v.MaxCategory), note, evidenceURL,
+		)
+		if rErr != nil {
+			log.Warn("moderation: InsertReport failed",
+				"roomId", rm.ID, "err", rErr)
+			continue
+		}
+		// Wire the verdict → report so admin UI can jump back and
+		// forth + so "label as false_positive" can auto-dismiss
+		// the linked report. reportID == 0 means the insert was a
+		// duplicate (collapsed by the unique index) — no link.
+		if verdictID > 0 && reportID > 0 {
+			if err := h.repo.LinkVerdictReport(ctx, verdictID, reportID); err != nil {
+				log.Warn("moderation: LinkVerdictReport failed", "err", err)
+			}
 		}
 		log.Info("moderation: room flagged",
 			"roomId", rm.ID, "title", rm.Title,
 			"category", v.MaxCategory, "score", v.MaxScore,
-			"provider", v.Provider)
+			"provider", v.Provider, "verdictId", verdictID, "reportId", reportID)
 	}
+}
+
+// RunVerdictCleanup periodically deletes verdicts older than maxAge
+// that aren't pinned + unlinks the corresponding thumbnail files
+// from /var/lib/dfchat/evidence. Pinned rows survive forever.
+//
+// Cadence: every 6 h. SweepOldVerdicts is a single DELETE…RETURNING
+// so a few thousand-row sweeps stay under a second.
+func (h *Handler) RunVerdictCleanup(ctx context.Context, maxAge time.Duration, log *slog.Logger) {
+	go func() {
+		t := time.NewTicker(6 * time.Hour)
+		defer t.Stop()
+		sweep := func() {
+			thumbs, err := h.repo.SweepOldVerdicts(ctx, maxAge)
+			if err != nil {
+				log.Warn("verdict cleanup: SQL sweep failed", "err", err)
+				return
+			}
+			if len(thumbs) == 0 {
+				return
+			}
+			// Try to unlink each archived JPEG. The DB row is gone
+			// either way; the file is just storage we'd otherwise
+			// leak. EvidencePublicBase prefix tells us where the
+			// served path maps to disk: strip the URL prefix and
+			// prepend EvidenceDir.
+			unlinked := 0
+			for _, u := range thumbs {
+				rel := strings.TrimPrefix(u, EvidencePublicBase)
+				if rel == u || rel == "" {
+					// Either not an archived URL (live thumb) or
+					// already absolute; skip.
+					continue
+				}
+				full := filepath.Join(EvidenceDir, rel)
+				if err := os.Remove(full); err == nil {
+					unlinked++
+				}
+			}
+			log.Info("verdict cleanup: swept",
+				"deleted_rows", len(thumbs), "unlinked_files", unlinked, "maxAge", maxAge)
+		}
+		// Run once at boot so old rows clear without waiting 6 h.
+		sweep()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				sweep()
+			}
+		}
+	}()
 }
 
 // =================================================================
