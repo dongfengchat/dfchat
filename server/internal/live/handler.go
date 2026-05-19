@@ -630,6 +630,13 @@ func (h *Handler) broadcastRoomDeleted(_ context.Context, roomID int64) {
 	for _, uid := range viewers {
 		h.bus.Publish(uid, wsbus.Event{Type: "live.room.deleted", Payload: payload})
 	}
+	// Diagnostic: confirm the fan-out actually had recipients. If
+	// this prints 0 the realtime handler's liveSubs map didn't have
+	// any user IDs for this room — viewer never sent live.subscribe,
+	// or sent it with a different room id format, or already
+	// unsubscribed. Common gotcha: numeric vs string room id.
+	slog.Info("live.room.deleted broadcast",
+		"roomId", roomID, "roomKey", roomKey, "recipients", len(viewers))
 }
 
 func (h *Handler) listMine(c *gin.Context) {
